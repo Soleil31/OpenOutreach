@@ -67,6 +67,14 @@ class Campaign(models.Model):
     seed_public_ids = models.JSONField(default=list, blank=True)
     model_blob = models.BinaryField(null=True, blank=True)
 
+    # Posting
+    posting_enabled = models.BooleanField(default=False)
+    post_system_prompt = models.TextField(blank=True, default="")
+    post_timezone = models.CharField(max_length=64, blank=True, default="UTC")
+    post_days_of_week = models.JSONField(blank=True, default=list)
+    post_times = models.JSONField(blank=True, default=list)
+    posts_per_week = models.IntegerField(default=3)
+
     def __str__(self):
         return self.name
 
@@ -182,7 +190,8 @@ class SearchKeyword(models.Model):
 class ActionLog(models.Model):
     class ActionType(models.TextChoices):
         CONNECT = "connect", "Connect"
-        FOLLOW_UP = "follow_up", "Follow Up"
+        FOLLOW_UP = "follow_up"
+        PUBLISH_POST = "publish_post", "Follow Up"
 
     linkedin_profile = models.ForeignKey(
         LinkedInProfile,
@@ -227,6 +236,7 @@ class Task(models.Model):
         CONNECT = "connect"
         CHECK_PENDING = "check_pending"
         FOLLOW_UP = "follow_up"
+        PUBLISH_POST = "publish_post"
 
     class Status(models.TextChoices):
         PENDING = "pending"
@@ -266,3 +276,44 @@ class Task(models.Model):
     def mark_failed(self):
         self.status = self.Status.FAILED
         self.save(update_fields=["status"])
+
+
+class Post(models.Model):
+    class Status(models.TextChoices):
+        PENDING_REVIEW = "pending_review", "Pending Review"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+        PUBLISHED = "published", "Published"
+        CANCELLED = "cancelled", "Cancelled"
+        FAILED = "failed", "Failed"
+
+    campaign = models.ForeignKey(
+        "Campaign", on_delete=models.CASCADE, related_name="posts",
+    )
+    topic = models.TextField()
+    text = models.TextField(blank=True)
+    image_path = models.CharField(max_length=500, blank=True)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING_REVIEW,
+    )
+    scheduled_at = models.DateTimeField(null=True, blank=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    approval_deadline = models.DateTimeField()
+    generation_attempts = models.IntegerField(default=1)
+    fail_reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "linkedin"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Post({self.campaign}, {self.status}, {self.created_at:%Y-%m-%d})"
+
+    def cancel_if_overdue(self) -> bool:
+        if self.status == self.Status.PENDING_REVIEW and timezone.now() > self.approval_deadline:
+            self.status = self.Status.CANCELLED
+            self.save(update_fields=["status", "updated_at"])
+            return True
+        return False

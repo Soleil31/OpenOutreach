@@ -3,7 +3,7 @@ from django.contrib import admin
 
 from chat.models import ChatMessage
 
-from linkedin.models import ActionLog, Campaign, LinkedInProfile, SearchKeyword, SiteConfig, Task
+from linkedin.models import ActionLog, Campaign, LinkedInProfile, Post, SearchKeyword, SiteConfig, Task
 
 
 @admin.register(SiteConfig)
@@ -64,3 +64,59 @@ class ChatMessageAdmin(admin.ModelAdmin):
     raw_id_fields = ("owner", "answer_to", "topic")
     date_hierarchy = "creation_date"
     readonly_fields = ("content_type", "object_id", "content", "owner", "creation_date")
+
+
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    list_display = ("id", "campaign", "status", "short_topic", "scheduled_at", "approval_deadline", "created_at")
+    list_filter = ("status", "campaign")
+    readonly_fields = ("created_at", "updated_at", "published_at", "generation_attempts")
+    fields = (
+        "campaign", "status", "topic", "text", "image_path",
+        "scheduled_at", "approval_deadline",
+        "generation_attempts", "fail_reason",
+        "created_at", "updated_at", "published_at",
+    )
+    actions = ["approve_posts", "reject_posts", "regenerate_posts"]
+    date_hierarchy = "created_at"
+
+    @admin.display(description="Topic")
+    def short_topic(self, obj):
+        return obj.topic[:60] + "..." if len(obj.topic) > 60 else obj.topic
+
+    @admin.action(description="Approve selected posts")
+    def approve_posts(self, request, queryset):
+        from linkedin.tasks.scheduler import enqueue_publish_post
+        from django.utils import timezone
+        updated = 0
+        for post in queryset.filter(status=Post.Status.PENDING_REVIEW):
+            if timezone.now() > post.approval_deadline:
+                post.status = Post.Status.CANCELLED
+                post.save(update_fields=["status", "updated_at"])
+                continue
+            post.status = Post.Status.APPROVED
+            post.save(update_fields=["status", "updated_at"])
+            delay = max(0, (post.scheduled_at - timezone.now()).total_seconds()) if post.scheduled_at else 10
+            enqueue_publish_post(post.pk, delay_seconds=delay)
+            updated += 1
+        self.message_user(request, str(updated) + " post(s) approved and queued.")
+
+    @admin.action(description="Reject selected posts")
+    def reject_posts(self, request, queryset):
+        updated = queryset.filter(status=Post.Status.PENDING_REVIEW).update(status=Post.Status.REJECTED)
+        self.message_user(request, str(updated) + " post(s) rejected.")
+
+    @admin.action(description="Regenerate selected posts")
+    def regenerate_posts(self, request, queryset):
+        from django.utils import timezone
+        from datetime import timedelta
+        regenerated = 0
+        for post in queryset.filter(status__in=[Post.Status.REJECTED, Post.Status.FAILED]):
+            post.status = Post.Status.PENDING_REVIEW
+            post.text = ""
+            post.fail_reason = ""
+            post.generation_attempts += 1
+            post.approval_deadline = timezone.now() + timedelta(hours=24)
+            post.save(update_fields=["status", "text", "fail_reason", "generation_attempts", "approval_deadline", "updated_at"])
+            regenerated += 1
+        self.message_user(request, str(regenerated) + " post(s) queued for regeneration.")
