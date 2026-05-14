@@ -62,12 +62,22 @@ def qualify_with_llm(profile_text: str, product_docs: str, campaign_objective: s
         profile_text=profile_text,
     )
 
-    agent = Agent(
-        get_llm_model(),
-        output_type=QualificationDecision,
-        model_settings={"temperature": 0.7, "timeout": 60},
-    )
-    decision = agent.run_sync(prompt).output
+    from linkedin.llm import is_codex_provider
+    if is_codex_provider():
+        from linkedin.agents.codex_client import get_codex_client
+        data = get_codex_client().chat_json(
+            system_prompt=prompt,
+            user_prompt="Respond with a JSON object matching the QualificationDecision schema.",
+            json_schema=QualificationDecision.model_json_schema(),
+        )
+        decision = QualificationDecision.model_validate(data)
+    else:
+        agent = Agent(
+            get_llm_model(),
+            output_type=QualificationDecision,
+            model_settings={"temperature": 0.7, "timeout": 60},
+        )
+        decision = agent.run_sync(prompt).output
 
     label = 1 if decision.qualified else 0
     return (label, decision.reason)

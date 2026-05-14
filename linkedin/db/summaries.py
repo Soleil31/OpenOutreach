@@ -88,13 +88,23 @@ def extract_facts(text: str, *, context: str = "") -> list[str]:
     if context:
         system = f"{system}\n\nContext for relevance:\n{context}"
 
-    agent = Agent(
-        get_llm_model(),
-        system_prompt=system,
-        output_type=FactList,
-        model_settings={"temperature": 0.0, "timeout": 60},
-    )
-    result: FactList = agent.run_sync(text).output
+    from linkedin.llm import is_codex_provider
+    if is_codex_provider():
+        from linkedin.agents.codex_client import get_codex_client
+        data = get_codex_client().chat_json(
+            system_prompt=system,
+            user_prompt=text,
+            json_schema=FactList.model_json_schema(),
+        )
+        result = FactList.model_validate(data)
+    else:
+        agent = Agent(
+            get_llm_model(),
+            system_prompt=system,
+            output_type=FactList,
+            model_settings={"temperature": 0.0, "timeout": 60},
+        )
+        result: FactList = agent.run_sync(text).output
     return list(result.facts)
 
 
@@ -228,8 +238,16 @@ def _request_memory_actions(existing: list[str], new_facts: list[str]) -> list[_
     old_memory = [{"id": str(idx), "text": fact} for idx, fact in enumerate(existing)]
     prompt = get_update_memory_messages(old_memory, new_facts, None)
 
-    agent = Agent(get_llm_model(), model_settings={"temperature": 0.0, "timeout": 60})
-    text = agent.run_sync(prompt).output
+    from linkedin.llm import is_codex_provider
+    if is_codex_provider():
+        from linkedin.agents.codex_client import get_codex_client
+        text = get_codex_client().chat(
+            system_prompt="You are a memory reconciliation assistant. Follow the instructions in the user message exactly.",
+            user_prompt=str(prompt),
+        )
+    else:
+        agent = Agent(get_llm_model(), model_settings={"temperature": 0.0, "timeout": 60})
+        text = agent.run_sync(prompt).output
     return _ReconcileResponse.model_validate(_parse_memory_response(text)).memory
 
 

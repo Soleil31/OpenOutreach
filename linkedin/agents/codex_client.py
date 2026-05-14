@@ -52,7 +52,7 @@ class CodexClient:
                 self.binary, "exec",
                 "--ephemeral",
                 "--skip-git-repo-check",
-                "--sandbox", "read-only",
+                "--no-sandbox",
                 "-C", self.work_dir,
                 "-m", self.model,
                 "-o", out_path,

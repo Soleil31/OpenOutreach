@@ -41,12 +41,22 @@ def generate_search_keywords(
         exclude_keywords=exclude_keywords or [],
     )
 
-    agent = Agent(
-        get_llm_model(),
-        output_type=SearchKeywords,
-        model_settings={"temperature": 0.9},
-    )
-    result = agent.run_sync(prompt).output
+    from linkedin.llm import is_codex_provider
+    if is_codex_provider():
+        from linkedin.agents.codex_client import get_codex_client
+        data = get_codex_client().chat_json(
+            system_prompt=prompt,
+            user_prompt="Respond with a JSON object matching the SearchKeywords schema.",
+            json_schema=SearchKeywords.model_json_schema(),
+        )
+        result = SearchKeywords.model_validate(data)
+    else:
+        agent = Agent(
+            get_llm_model(),
+            output_type=SearchKeywords,
+            model_settings={"temperature": 0.9},
+        )
+        result = agent.run_sync(prompt).output
 
     logger.info("Generated %d search keywords via LLM", len(result.keywords))
     return result.keywords
