@@ -20,6 +20,14 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 ENV EDITOR=nano
 RUN playwright install --with-deps chromium
 
+# Node.js + Codex CLI
+RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @openai/codex \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
+
 # VNC stack (started conditionally via ENABLE_VNC=true at runtime)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

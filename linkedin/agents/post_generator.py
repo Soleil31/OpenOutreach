@@ -5,10 +5,9 @@ from __future__ import annotations
 import logging
 
 import jinja2
-from pydantic_ai import Agent
 
 from linkedin.conf import PROMPTS_DIR
-from linkedin.llm import get_llm_model
+from linkedin.llm import is_codex_provider
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +40,22 @@ def generate_post_text(
         language=language or "English",
     )
 
-    agent = Agent(
-        get_llm_model(),
-        system_prompt=system_prompt,
-        output_type=str,
-        model_settings={"temperature": 0.8, "timeout": 60},
-    )
-    text: str = agent.run_sync("Write the post now.").output.strip()
+    if is_codex_provider():
+        from linkedin.agents.codex_client import get_codex_client
+        text: str = get_codex_client().chat(
+            system_prompt=system_prompt,
+            user_prompt="Write the post now.",
+        )
+    else:
+        from pydantic_ai import Agent
+        from linkedin.llm import get_llm_model
+        agent = Agent(
+            get_llm_model(),
+            system_prompt=system_prompt,
+            output_type=str,
+            model_settings={"temperature": 0.8, "timeout": 60},
+        )
+        text = agent.run_sync("Write the post now.").output.strip()
+
     logger.info("Generated post (%d chars) for campaign %s", len(text), campaign.name)
     return text

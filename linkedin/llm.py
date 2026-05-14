@@ -114,3 +114,11 @@ def get_llm_model():
     if builder is None:
         raise ValueError(f"Unknown LLM provider: {cfg.llm_provider!r}")
     return builder(cfg)
+
+
+def is_codex_provider() -> bool:
+    """Return True when SiteConfig.llm_provider == 'codex'."""
+    try:
+        return _validated_site_config().llm_provider == "codex"
+    except Exception:
+        return False

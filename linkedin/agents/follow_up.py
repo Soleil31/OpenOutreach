@@ -176,14 +176,24 @@ def run_follow_up_agent(session, deal) -> FollowUpDecision:
     recent = _load_recent_messages(deal)
     system_prompt = _render_system_prompt(session, deal, recent)
 
-    agent = Agent(
-        get_llm_model(),
-        output_type=FollowUpDecision,
-        model_settings={"temperature": 0.7, "timeout": 60},
-    )
-    decision = agent.run_sync(system_prompt).output
-    if decision is None:
-        raise RuntimeError(f"LLM returned unparseable response for follow-up of {public_id}")
+    from linkedin.llm import is_codex_provider
+    if is_codex_provider():
+        from linkedin.agents.codex_client import get_codex_client
+        data = get_codex_client().chat_json(
+            system_prompt=system_prompt,
+            user_prompt="Respond with a JSON object matching the FollowUpDecision schema.",
+            json_schema=FollowUpDecision.model_json_schema(),
+        )
+        decision = FollowUpDecision.model_validate(data)
+    else:
+        agent = Agent(
+            get_llm_model(),
+            output_type=FollowUpDecision,
+            model_settings={"temperature": 0.7, "timeout": 60},
+        )
+        decision = agent.run_sync(system_prompt).output
+        if decision is None:
+            raise RuntimeError(f"LLM returned unparseable response for follow-up of {public_id}")
 
     logger.info("follow_up agent for %s: %s", public_id, decision.action)
     return decision
