@@ -28,6 +28,7 @@ class SiteConfig(models.Model):
         MISTRAL = "mistral", "Mistral"
         COHERE = "cohere", "Cohere"
         OPENAI_COMPATIBLE = "openai_compatible", "OpenAI-compatible"
+        CODEX = "codex", "Codex CLI"
 
     llm_provider = models.CharField(
         max_length=32,
@@ -37,6 +38,7 @@ class SiteConfig(models.Model):
     llm_api_key = models.CharField(max_length=500, blank=True, default="")
     ai_model = models.CharField(max_length=200, blank=True, default="")
     llm_api_base = models.CharField(max_length=500, blank=True, default="")
+    figma_token = models.CharField(max_length=500, blank=True, default="")
 
     class Meta:
         app_label = "linkedin"
@@ -63,6 +65,7 @@ class Campaign(models.Model):
     campaign_objective = models.TextField(blank=True)
     booking_link = models.URLField(max_length=500, blank=True)
     is_freemium = models.BooleanField(default=False)
+    outreach_enabled = models.BooleanField(default=True)
     action_fraction = models.FloatField(default=0.2)
     seed_public_ids = models.JSONField(default=list, blank=True)
     model_blob = models.BinaryField(null=True, blank=True)
@@ -74,6 +77,9 @@ class Campaign(models.Model):
     post_days_of_week = models.JSONField(blank=True, default=list)
     post_times = models.JSONField(blank=True, default=list)
     posts_per_week = models.IntegerField(default=3)
+    post_language = models.CharField(max_length=32, blank=True, default="English")
+    post_approval_timeout_hours = models.PositiveIntegerField(default=24)
+    figma_file_key = models.CharField(max_length=200, blank=True, default="")
 
     def __str__(self):
         return self.name
@@ -104,6 +110,15 @@ class LinkedInProfile(models.Model):
     follow_up_daily_limit = models.PositiveIntegerField(default=25)
     legal_accepted = models.BooleanField(default=False)
     cookie_data = models.JSONField(null=True, blank=True)
+    cookie_import_json = models.TextField(blank=True, default="")
+    cookie_imported_at = models.DateTimeField(null=True, blank=True)
+    browser_user_agent = models.TextField(blank=True, default="")
+    browser_locale = models.CharField(max_length=32, blank=True, default="")
+    browser_timezone = models.CharField(max_length=64, blank=True, default="")
+    browser_is_mobile = models.BooleanField(default=False)
+    browser_has_touch = models.BooleanField(default=False)
+    browser_viewport_width = models.PositiveIntegerField(default=1365)
+    browser_viewport_height = models.PositiveIntegerField(default=768)
     newsletter_processed = models.BooleanField(default=False)
 
     def __init__(self, *args, **kwargs):
@@ -191,7 +206,7 @@ class ActionLog(models.Model):
     class ActionType(models.TextChoices):
         CONNECT = "connect", "Connect"
         FOLLOW_UP = "follow_up"
-        PUBLISH_POST = "publish_post", "Follow Up"
+        PUBLISH_POST = "publish_post", "Publish Post"
 
     linkedin_profile = models.ForeignKey(
         LinkedInProfile,
@@ -236,6 +251,7 @@ class Task(models.Model):
         CONNECT = "connect"
         CHECK_PENDING = "check_pending"
         FOLLOW_UP = "follow_up"
+        GENERATE_POST = "generate_post"
         PUBLISH_POST = "publish_post"
 
     class Status(models.TextChoices):
@@ -279,6 +295,18 @@ class Task(models.Model):
 
 
 class Post(models.Model):
+    class MediaMode(models.TextChoices):
+        NONE = "none", "No image"
+        TEMPLATE = "template", "Template cover"
+        AI = "ai", "AI generated image"
+        UPLOADED = "uploaded", "Uploaded image"
+
+    class Source(models.TextChoices):
+        MANUAL = "manual", "Manual"
+        SCHEDULED = "scheduled", "Scheduled"
+        IMPORTED = "imported", "Imported"
+        GENERATED_TOPIC = "generated_topic", "Generated Topic"
+
     class Status(models.TextChoices):
         PENDING_REVIEW = "pending_review", "Pending Review"
         APPROVED = "approved", "Approved"
@@ -293,12 +321,28 @@ class Post(models.Model):
     topic = models.TextField()
     text = models.TextField(blank=True)
     image_path = models.CharField(max_length=500, blank=True)
+    media_mode = models.CharField(
+        max_length=20,
+        choices=MediaMode.choices,
+        default=MediaMode.NONE,
+    )
+    image_template_key = models.CharField(max_length=200, blank=True, default="")
+    cover_text = models.CharField(max_length=300, blank=True, default="")
+    language = models.CharField(max_length=32, blank=True, default="English")
+    include_hashtags = models.BooleanField(default=True)
+    hashtags_count = models.PositiveSmallIntegerField(default=3)
+    cta = models.TextField(blank=True, default="")
+    source = models.CharField(
+        max_length=20,
+        choices=Source.choices,
+        default=Source.MANUAL,
+    )
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.PENDING_REVIEW,
     )
     scheduled_at = models.DateTimeField(null=True, blank=True)
     published_at = models.DateTimeField(null=True, blank=True)
-    approval_deadline = models.DateTimeField()
+    approval_deadline = models.DateTimeField(null=True, blank=True)
     generation_attempts = models.IntegerField(default=1)
     fail_reason = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -311,9 +355,68 @@ class Post(models.Model):
     def __str__(self):
         return f"Post({self.campaign}, {self.status}, {self.created_at:%Y-%m-%d})"
 
+    def save(self, *args, **kwargs):
+        if self.status == self.Status.PENDING_REVIEW and self.approval_deadline is None:
+            timeout_hours = 24
+            if self.campaign_id:
+                timeout_hours = self.campaign.post_approval_timeout_hours or timeout_hours
+            self.approval_deadline = timezone.now() + timedelta(hours=timeout_hours)
+        super().save(*args, **kwargs)
+
     def cancel_if_overdue(self) -> bool:
-        if self.status == self.Status.PENDING_REVIEW and timezone.now() > self.approval_deadline:
+        if (
+            self.status == self.Status.PENDING_REVIEW
+            and self.approval_deadline is not None
+            and timezone.now() > self.approval_deadline
+        ):
             self.status = self.Status.CANCELLED
             self.save(update_fields=["status", "updated_at"])
             return True
         return False
+
+
+class PostTopic(models.Model):
+    class Source(models.TextChoices):
+        MANUAL = "manual", "Manual"
+        IMPORTED = "imported", "Imported"
+        GENERATED = "generated", "Generated"
+
+    campaign = models.ForeignKey(
+        "Campaign", on_delete=models.CASCADE, related_name="post_topics",
+    )
+    prompt = models.TextField()
+    language = models.CharField(max_length=32, blank=True, default="")
+    include_hashtags = models.BooleanField(default=True)
+    hashtags_count = models.PositiveSmallIntegerField(default=3)
+    cta = models.TextField(blank=True, default="")
+    media_mode = models.CharField(
+        max_length=20,
+        choices=Post.MediaMode.choices,
+        default=Post.MediaMode.NONE,
+    )
+    image_template_key = models.CharField(max_length=200, blank=True, default="")
+    source = models.CharField(
+        max_length=20,
+        choices=Source.choices,
+        default=Source.MANUAL,
+    )
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    post = models.OneToOneField(
+        "Post",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="topic_request",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "linkedin"
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["campaign", "consumed_at", "created_at"]),
+        ]
+
+    def __str__(self):
+        return self.prompt[:80] + "..." if len(self.prompt) > 80 else self.prompt
