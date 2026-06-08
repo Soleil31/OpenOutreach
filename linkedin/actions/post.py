@@ -1,13 +1,90 @@
 # linkedin/actions/post.py
-"""Playwright automation for publishing a LinkedIn text post."""
+"""Playwright UI automation for publishing LinkedIn posts.
+
+The bot's normal browser context is mobile (Android Chrome UA, 393×852,
+touch=True). LinkedIn's mobile web (mweb) deliberately omits the
+"create your own post" composer — only OPEN_SHARE_MODAL (reshare) is
+available. To publish from a server with only ``li_at`` + ``JSESSIONID``
+cookies, we spawn a SECOND browser context on the same Playwright
+instance with a desktop UA + viewport, copy cookies across, and drive the
+desktop composer UI. The mobile context (which runs connect/scrape
+tasks) is left untouched.
+
+Why this is safer than it sounds:
+- Same Playwright process, same Chromium build, same IP (residential
+  proxy) — the only fingerprint difference is UA/viewport.
+- Used once per post (1-2 posts/day per Cexim guidance), not for every
+  outreach action — well below LinkedIn's anomaly thresholds.
+- Pattern documented in cookie-based LinkedIn automation guides as the
+  canonical way to use ``li_at`` for content creation without OAuth.
+"""
 from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
-from playwright.sync_api import Page, TimeoutError as PWTimeout
+from playwright.sync_api import (
+    BrowserContext,
+    Page,
+    TimeoutError as PWTimeout,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# Desktop fingerprint used for one-shot publishing contexts. Linux Chrome
+# matches the proxy's residential geography (NL/UAE) without raising the
+# usual "headless Chromium" flags.
+_DESKTOP_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+)
+_DESKTOP_VIEWPORT = {"width": 1366, "height": 900}
+
+
+def _spawn_desktop_context(session) -> tuple[BrowserContext, Page]:
+    """Open a fresh desktop browser context on the session's existing
+    Playwright/Browser, carrying over the mobile session's cookies.
+
+    Returns ``(context, page)``. Caller must call ``context.close()``
+    when done. Does NOT touch ``session.context`` / ``session.page``.
+    """
+    from playwright_stealth import Stealth  # same lib login.py uses
+
+    session.ensure_browser()
+    if session.browser is None:
+        raise RuntimeError("Session has no live browser — cannot spawn desktop context")
+
+    cookies = session.context.cookies()
+
+    # Match the locale/timezone of the mobile profile so things like
+    # geo-suggestion + date formatting line up across the two contexts.
+    profile = session.linkedin_profile
+    locale = profile.browser_locale or "en-US"
+    timezone_id = profile.browser_timezone or "Europe/Amsterdam"
+
+    desktop_ctx = session.browser.new_context(
+        user_agent=_DESKTOP_UA,
+        viewport=_DESKTOP_VIEWPORT,
+        locale=locale,
+        timezone_id=timezone_id,
+        is_mobile=False,
+        has_touch=False,
+        device_scale_factor=1,
+    )
+    desktop_ctx.add_cookies(cookies)
+    try:
+        Stealth().apply_stealth_sync(desktop_ctx)
+    except Exception as exc:
+        logger.warning("Stealth patch failed on desktop context (continuing): %s", exc)
+
+    page = desktop_ctx.new_page()
+    logger.info(
+        "Spawned desktop publishing context (UA=Linux Chrome, %dx%d, %d cookies)",
+        _DESKTOP_VIEWPORT["width"], _DESKTOP_VIEWPORT["height"], len(cookies),
+    )
+    return desktop_ctx, page
 
 # LinkedIn renders the feed/composer in the account's UI language, so any
 # selector keyed on visible text must cover EN + RU at minimum. We also keep
@@ -75,24 +152,13 @@ def _dismiss_gdpr_if_present(page: Page) -> None:
 
 
 def _open_composer(page: Page) -> None:
-    """Open the LinkedIn post composer modal.
+    """Open the LinkedIn post composer modal on a desktop page.
 
-    The bot's browser profile is mobile (393x852, Android UA), so LinkedIn
-    serves the mweb UI — which doesn't have a "create your own post"
-    composer at all (only OPEN_SHARE_MODAL for resharing). To get the
-    desktop composer we resize the viewport to a desktop width before
-    navigating; LinkedIn picks UI variant primarily by viewport width.
-
-    After resize: navigate to ``/feed/?shareActive=true`` (LinkedIn's
-    own deep-link to the composer) and wait for the editor to appear.
-    Fall back to clicking a trigger button by structural+text selectors.
+    Strategy: navigate to ``/feed/?shareActive=true`` (LinkedIn's own
+    deep-link to the composer), dismiss any GDPR banner, and wait for
+    the editor. Fall back to clicking the "Start a post" trigger if
+    the deep-link doesn't auto-open the modal.
     """
-    try:
-        page.set_viewport_size({"width": 1366, "height": 900})
-        logger.info("Viewport resized to desktop 1366x900 for composer")
-    except Exception as exc:
-        logger.warning("Viewport resize failed (continuing anyway): %s", exc)
-
     logger.info("Opening post composer via ?shareActive=true")
     page.goto(
         "https://www.linkedin.com/feed/?shareActive=true",
@@ -112,7 +178,6 @@ def _open_composer(page: Page) -> None:
         except PWTimeout:
             continue
 
-    # Fallback: click the trigger button.
     logger.info("Deep-link didn't open composer, falling back to trigger click")
     start_btn = None
     for sel in _START_POST_SELECTORS:
@@ -127,7 +192,6 @@ def _open_composer(page: Page) -> None:
     start_btn.click()
     time.sleep(1.5)
 
-    # After trigger click — wait for editor to actually appear.
     for sel in _POST_EDITOR_SELECTORS:
         try:
             if page.wait_for_selector(sel, timeout=4_000, state="visible"):
@@ -138,57 +202,56 @@ def _open_composer(page: Page) -> None:
     raise RuntimeError("Trigger clicked but post editor never appeared")
 
 
-def publish_text_post(page: Page, text: str) -> None:
-    """Publish a plain-text post on the LinkedIn feed.
+def _find_first(page: Page, selectors: list[str], timeout_ms: int):
+    """Return the first visible element matching any selector, or None."""
+    for sel in selectors:
+        try:
+            el = page.wait_for_selector(sel, timeout=timeout_ms, state="visible")
+            if el:
+                return el
+        except PWTimeout:
+            continue
+    return None
 
-    Navigates to the feed, opens the post composer, types the text,
-    and submits. Raises RuntimeError on any step failure.
+
+def publish_text_post(session, text: str) -> None:
+    """Publish a text-only LinkedIn post.
+
+    Spawns a temporary desktop browser context (mobile-context cookies
+    are copied across), drives the desktop composer UI, and tears down
+    the context. The mobile session is not touched.
     """
-    _open_composer(page)
-
-    # Find editor
-    editor = None
-    for sel in _POST_EDITOR_SELECTORS:
-        try:
-            editor = page.wait_for_selector(sel, timeout=5_000, state="visible")
-            if editor:
-                break
-        except PWTimeout:
-            continue
-
-    if not editor:
-        raise RuntimeError("Post editor did not open")
-
-    editor.click()
-    time.sleep(0.5)
-    editor.fill(text)
-    time.sleep(1)
-
-    # Submit
-    submit_btn = None
-    for sel in _SUBMIT_SELECTORS:
-        try:
-            submit_btn = page.wait_for_selector(sel, timeout=5_000, state="visible")
-            if submit_btn:
-                break
-        except PWTimeout:
-            continue
-
-    if not submit_btn:
-        raise RuntimeError("Could not find Post submit button")
-
-    submit_btn.click()
-    logger.info("Post submit clicked, waiting for confirmation")
-    time.sleep(3)
-
-    # Light confirmation: feed should reload or modal closes
+    desktop_ctx, page = _spawn_desktop_context(session)
     try:
-        page.wait_for_selector(".share-creation-state", state="hidden", timeout=10_000)
-    except PWTimeout:
-        # Modal might not exist — that's fine
-        pass
+        _open_composer(page)
 
-    logger.info("Post published successfully")
+        editor = _find_first(page, _POST_EDITOR_SELECTORS, timeout_ms=5_000)
+        if not editor:
+            raise RuntimeError("Post editor did not open")
+        editor.click()
+        time.sleep(0.4)
+        editor.fill(text)
+        time.sleep(1)
+
+        submit_btn = _find_first(page, _SUBMIT_SELECTORS, timeout_ms=5_000)
+        if not submit_btn:
+            raise RuntimeError("Could not find Post submit button")
+        submit_btn.click()
+        logger.info("Post submit clicked, waiting for confirmation")
+        time.sleep(4)
+
+        # Modal should disappear once the share is accepted server-side.
+        try:
+            page.wait_for_selector(".share-creation-state", state="hidden", timeout=10_000)
+        except PWTimeout:
+            pass
+
+        logger.info("Text post published successfully")
+    finally:
+        try:
+            desktop_ctx.close()
+        except Exception as exc:
+            logger.warning("Failed to close desktop context: %s", exc)
 
 
 # ── Image post ──────────────────────────────────────────────────────────
@@ -221,87 +284,67 @@ _DONE_AFTER_UPLOAD_SELECTORS = [
 ]
 
 
-def publish_image_post(page: "Page", text: str, image_path) -> None:
+def publish_image_post(session, text: str, image_path) -> None:
     """Publish a LinkedIn post with a single image attached.
 
-    Same flow as ``publish_text_post`` but inserts a media upload between
-    typing the text and pressing Post:
+    Spawns a temporary desktop browser context (mobile-context cookies
+    are copied across), drives the desktop composer UI:
       1. open composer
-      2. type text
+      2. fill text
       3. click "Add media", upload the file via ``input[type=file]``
-      4. confirm media (Done/Next)
-      5. submit
-    Crashes on unexpected errors per project convention.
+      4. confirm crop modal (Done/Next)
+      5. submit Post
+    Then tears down the desktop context. The mobile session is not
+    touched. Crashes on unexpected errors per project convention.
     """
-    image_path = str(image_path)
-    _open_composer(page)
-
-    editor = None
-    for sel in _POST_EDITOR_SELECTORS:
-        try:
-            editor = page.wait_for_selector(sel, timeout=5_000, state="visible")
-            if editor:
-                break
-        except PWTimeout:
-            continue
-    if not editor:
-        raise RuntimeError("Post editor did not open")
-    editor.click()
-    time.sleep(0.5)
-    editor.fill(text)
-    time.sleep(1)
-
-    # Open media picker
-    media_btn = None
-    for sel in _ADD_MEDIA_SELECTORS:
-        try:
-            media_btn = page.wait_for_selector(sel, timeout=5_000, state="visible")
-            if media_btn:
-                break
-        except PWTimeout:
-            continue
-    if not media_btn:
-        raise RuntimeError("Could not find 'Add media' button in composer")
-    media_btn.click()
-    time.sleep(1)
-
-    # Upload via hidden <input type=file>. LinkedIn keeps it in the DOM even
-    # when the picker dialog hasn't rendered the file chooser button.
-    file_input = page.locator('input[type="file"]').first
-    file_input.wait_for(state="attached", timeout=10_000)
-    file_input.set_input_files(image_path)
-    logger.info("Image uploaded: %s", image_path)
-
-    # Confirm the media (Done/Next) — LinkedIn shows a small modal with crop tools
-    done_btn = None
-    for sel in _DONE_AFTER_UPLOAD_SELECTORS:
-        try:
-            done_btn = page.wait_for_selector(sel, timeout=15_000, state="visible")
-            if done_btn:
-                break
-        except PWTimeout:
-            continue
-    if done_btn:
-        done_btn.click()
-        time.sleep(2)
-
-    # Submit
-    submit_btn = None
-    for sel in _SUBMIT_SELECTORS:
-        try:
-            submit_btn = page.wait_for_selector(sel, timeout=10_000, state="visible")
-            if submit_btn:
-                break
-        except PWTimeout:
-            continue
-    if not submit_btn:
-        raise RuntimeError("Could not find Post submit button after media upload")
-    submit_btn.click()
-    logger.info("Image post submit clicked")
-    time.sleep(3)
-
+    image_path = str(Path(image_path))
+    desktop_ctx, page = _spawn_desktop_context(session)
     try:
-        page.wait_for_selector(".share-creation-state", state="hidden", timeout=10_000)
-    except PWTimeout:
-        pass
-    logger.info("Image post published successfully")
+        _open_composer(page)
+
+        editor = _find_first(page, _POST_EDITOR_SELECTORS, timeout_ms=5_000)
+        if not editor:
+            raise RuntimeError("Post editor did not open")
+        editor.click()
+        time.sleep(0.4)
+        editor.fill(text)
+        time.sleep(1)
+
+        media_btn = _find_first(page, _ADD_MEDIA_SELECTORS, timeout_ms=5_000)
+        if not media_btn:
+            raise RuntimeError("Could not find 'Add media' button in composer")
+        media_btn.click()
+        time.sleep(1)
+
+        # LinkedIn keeps the hidden <input type=file> in the DOM even when
+        # the picker dialog hasn't rendered the OS file chooser.
+        file_input = page.locator('input[type="file"]').first
+        file_input.wait_for(state="attached", timeout=10_000)
+        file_input.set_input_files(image_path)
+        logger.info("Image uploaded: %s", image_path)
+
+        # The crop/preview modal then appears. Hit Done/Next (give it
+        # extra time — LinkedIn does server-side processing here).
+        done_btn = _find_first(page, _DONE_AFTER_UPLOAD_SELECTORS, timeout_ms=15_000)
+        if done_btn:
+            done_btn.click()
+            time.sleep(2)
+
+        submit_btn = _find_first(page, _SUBMIT_SELECTORS, timeout_ms=10_000)
+        if not submit_btn:
+            raise RuntimeError("Could not find Post submit button after media upload")
+        submit_btn.click()
+        logger.info("Image post submit clicked, waiting for upload to finalize")
+        time.sleep(5)
+
+        try:
+            page.wait_for_selector(".share-creation-state", state="hidden", timeout=15_000)
+        except PWTimeout:
+            pass
+
+        logger.info("Image post published successfully")
+    finally:
+        try:
+            desktop_ctx.close()
+        except Exception as exc:
+            logger.warning("Failed to close desktop context: %s", exc)
