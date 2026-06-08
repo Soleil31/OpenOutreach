@@ -127,6 +127,7 @@ Three apps in `INSTALLED_APPS`:
 - **`api/messaging/send.py`** — Send messages via Voyager messaging API.
 - **`api/messaging/conversations.py`** — Fetch conversations/messages.
 - **`api/messaging/utils.py`** — Shared helpers: `encode_urn()`, `check_response()`.
+- **`integrations/figma.py`** — Figma API client for post cover images. `get_template_png(file_key, token)` finds the "Шаблон" page → first FRAME → exports as PNG @2x, caches in `/app/data/figma_cache/` (2h TTL, override with `FIGMA_CACHE_DIR`). `compose_cover(template_png, cover_text, post_id)` overlays text on the template via Pillow (centered in lower 30%, white with drop shadow, word-wrapped) and writes the result to `/app/data/figma_covers/<post_id>.png` (override with `FIGMA_COVER_DIR`). Token stored in `SiteConfig.figma_token`; per-campaign file in `Campaign.figma_file_key`. Used by `tasks/publish_post.py:_maybe_prepare_cover` when `Post.media_mode == TEMPLATE`.
 - **`setup/freemium.py`** — `import_freemium_campaign()`, `seed_profiles()`.
 - **`setup/gdpr.py`** — `apply_gdpr_newsletter_override()`.
 - **`setup/self_profile.py`** — `discover_self_profile()` — fetches self profile via Voyager API, sets `linkedin_profile.self_lead`.
@@ -157,5 +158,5 @@ Base image: `mcr.microsoft.com/playwright/python:v1.55.0-noble`. VNC on port 590
 
 `requirements/` files. DjangoCRM's `mysqlclient` excluded via `--no-deps`. `uv pip install` for fast installs.
 
-Core: `playwright`, `playwright-stealth`, `Django`, `django-crm-admin`, `pandas`, `pydantic-ai-slim` (with `openai`/`anthropic`/`google`/`groq`/`mistral`/`cohere`/`bedrock` extras), `jinja2`, `pydantic`, `jsonpath-ng`, `tendo`, `termcolor`, `tenacity`
+Core: `playwright`, `playwright-stealth`, `Django`, `django-crm-admin`, `pandas`, `pydantic-ai-slim` (with `openai`/`anthropic`/`google`/`groq`/`mistral`/`cohere`/`bedrock` extras), `jinja2`, `pydantic`, `jsonpath-ng`, `tendo`, `termcolor`, `tenacity`, `httpx` (Figma API), `Pillow` (cover image composition)
 ML: `scikit-learn`, `numpy`, `fastembed`, `joblib`

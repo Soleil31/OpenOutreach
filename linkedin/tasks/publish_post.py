@@ -32,11 +32,15 @@ def handle_publish_post(task, session, qualifiers) -> None:
         logger.info("Post %s skipped (status=%s)", post_id, post.status)
         return
 
-    from linkedin.actions.post import publish_text_post
+    from linkedin.actions.post import publish_image_post, publish_text_post
 
     session.ensure_browser()
     try:
-        publish_text_post(session.page, post.text)
+        image_path = _maybe_prepare_cover(post)
+        if image_path:
+            publish_image_post(session.page, post.text, image_path)
+        else:
+            publish_text_post(session.page, post.text)
         post.status = Post.Status.PUBLISHED
         post.published_at = timezone.now()
         post.save(update_fields=["status", "published_at", "updated_at"])
@@ -46,3 +50,45 @@ def handle_publish_post(task, session, qualifiers) -> None:
         post.fail_reason = str(exc)
         post.save(update_fields=["status", "fail_reason", "updated_at"])
         raise
+
+
+def _maybe_prepare_cover(post):
+    """Return a path to a composed cover image, or None if no cover is needed.
+
+    Returns None when:
+      * ``media_mode`` is not ``TEMPLATE`` (text-only / AI / uploaded handled elsewhere)
+      * the campaign has no ``figma_file_key`` configured
+      * ``SiteConfig.figma_token`` is missing
+
+    Crashes on Figma API errors per project convention (caller marks Post FAILED).
+    """
+    if post.media_mode != Post.MediaMode.TEMPLATE:
+        return None
+
+    campaign = post.campaign
+    if not campaign.figma_file_key:
+        logger.info(
+            "Post %s media_mode=template but campaign has no figma_file_key — text-only",
+            post.pk,
+        )
+        return None
+
+    from linkedin.integrations.figma import compose_cover, get_template_png
+    from linkedin.models import SiteConfig
+
+    cfg = SiteConfig.load()
+    if not cfg.figma_token:
+        logger.warning(
+            "Post %s wants Figma cover but SiteConfig.figma_token is empty — text-only",
+            post.pk,
+        )
+        return None
+
+    template_png = get_template_png(campaign.figma_file_key, cfg.figma_token)
+    cover_text = post.cover_text or post.topic[:120]
+    cover_path = compose_cover(template_png, cover_text, post.pk)
+    # Persist for traceability — image_path lets the admin/UI see what was sent
+    post.image_path = str(cover_path)
+    post.save(update_fields=["image_path", "updated_at"])
+    logger.info("Post %s cover composed: %s", post.pk, cover_path)
+    return cover_path
