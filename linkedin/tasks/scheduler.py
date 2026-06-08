@@ -218,7 +218,7 @@ def enqueue_publish_post(post_id: int, delay_seconds: float = 10) -> bool:
     """Enqueue a publish_post task for the given Post id."""
     return _insert_task(
         task_type=Task.TaskType.PUBLISH_POST,
-        payload={post_id: post_id},
+        payload={"post_id": post_id},
         delay_seconds=delay_seconds,
-        dedup_keys=[post_id],
+        dedup_keys=["post_id"],
     )
