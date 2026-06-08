@@ -56,7 +56,9 @@ class Command(BaseCommand):
         from linkedin.browser.registry import get_first_active_profile, get_or_create_session
         from linkedin.models import SiteConfig
 
-        if not SiteConfig.load().llm_api_key:
+        cfg = SiteConfig.load()
+        # codex provider authenticates via ChatGPT OAuth (auth.json) — no API key needed.
+        if cfg.llm_provider != SiteConfig.LLMProvider.CODEX and not cfg.llm_api_key:
             logger.error("LLM_API_KEY is required. Set it in Site Configuration (Django Admin).")
             sys.exit(1)
 
