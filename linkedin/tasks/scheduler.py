@@ -215,10 +215,21 @@ def reconcile(session) -> None:
 
 
 def enqueue_publish_post(post_id: int, delay_seconds: float = 10) -> bool:
-    """Enqueue a publish_post task for the given Post id."""
+    """Enqueue a publish_post task for the given Post id.
+
+    The daemon's main loop fetches ``payload['campaign_id']`` for every task
+    before routing to a handler, so we resolve the Post's campaign here and
+    include it in the payload. Dedup is keyed on ``post_id`` only — one
+    pending publish_post per Post is the invariant we care about.
+    """
+    from linkedin.models import Post
+
+    post = Post.objects.filter(pk=post_id).select_related("campaign").first()
+    if post is None:
+        return False
     return _insert_task(
         task_type=Task.TaskType.PUBLISH_POST,
-        payload={"post_id": post_id},
+        payload={"post_id": post_id, "campaign_id": post.campaign_id},
         delay_seconds=delay_seconds,
         dedup_keys=["post_id"],
     )
