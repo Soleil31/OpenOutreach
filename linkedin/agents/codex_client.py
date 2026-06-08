@@ -52,7 +52,9 @@ class CodexClient:
                 self.binary, "exec",
                 "--ephemeral",
                 "--skip-git-repo-check",
-                "--no-sandbox",
+                # Patch: codex 0.130.0 renamed --no-sandbox →
+                # --dangerously-bypass-approvals-and-sandbox.
+                "--dangerously-bypass-approvals-and-sandbox",
                 "-C", self.work_dir,
                 "-m", self.model,
                 "-o", out_path,
@@ -62,8 +64,11 @@ class CodexClient:
                 s_fd, schema_path = tempfile.mkstemp(
                     prefix="openoutreach-codex-schema-", suffix=".json"
                 )
+                # Patch: OpenAI structured-output requires `additionalProperties: false`
+                # on every object schema; Pydantic doesn't emit it. We walk the tree
+                # in-place once before handing the file to codex.
                 with os.fdopen(s_fd, "w") as f:
-                    json.dump(json_schema, f, indent=2)
+                    json.dump(_strictify_schema(json_schema), f, indent=2)
                 args.extend(["--output-schema", schema_path])
 
             args.append("-")
@@ -229,3 +234,43 @@ def get_codex_client() -> CodexClient:
         ssl_cert=os.getenv("CODEX_SSL_CERT_FILE", ""),
         proxy=os.getenv("CODEX_PROXY") or os.getenv("CODEX_HTTPS_PROXY", ""),
     )
+
+
+def _strictify_schema(schema):
+    """Return a deep copy of ``schema`` with ``additionalProperties: false``
+    forced on every object-type subschema.
+
+    OpenAI's structured-output JSON-schema validator (used by codex CLI's
+    ``--output-schema``) rejects schemas that don't explicitly disallow
+    extra properties. Pydantic's ``model_json_schema()`` doesn't emit it,
+    so we have to inject it ourselves. Walks ``properties``, ``items``,
+    ``anyOf``/``oneOf``/``allOf``, and ``$defs`` so nested models work too.
+    """
+    import copy
+
+    def _walk(node):
+        if isinstance(node, dict):
+            t = node.get("type")
+            if t == "object" and "additionalProperties" not in node:
+                node["additionalProperties"] = False
+            for key in ("properties", "patternProperties", "$defs", "definitions"):
+                inner = node.get(key)
+                if isinstance(inner, dict):
+                    for v in inner.values():
+                        _walk(v)
+            for key in ("items", "contains", "additionalItems"):
+                inner = node.get(key)
+                if isinstance(inner, (dict, list)):
+                    _walk(inner)
+            for key in ("anyOf", "oneOf", "allOf", "prefixItems"):
+                inner = node.get(key)
+                if isinstance(inner, list):
+                    for v in inner:
+                        _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+
+    out = copy.deepcopy(schema)
+    _walk(out)
+    return out

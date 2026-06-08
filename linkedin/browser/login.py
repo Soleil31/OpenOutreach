@@ -1,5 +1,7 @@
 # linkedin/browser/login.py
 import logging
+import os
+from urllib.parse import urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -19,12 +21,20 @@ LINKEDIN_LOGIN_URL = "https://www.linkedin.com/login"
 LINKEDIN_FEED_URL = "https://www.linkedin.com/feed/"
 
 EMAIL_LOCATORS = [
+    # Language-independent CSS-селекторы (любой UI)
+    lambda p: p.locator('input#username'),
+    lambda p: p.locator('input[autocomplete="username"]'),
+    lambda p: p.locator('input[autocomplete="email"]'),
+    lambda p: p.locator('input[type="email"]'),
+    lambda p: p.locator('input[name="session_key"]'),
+    lambda p: p.locator('input[autocomplete="webauthn"]'),
+    lambda p: p.locator('input[inputmode="email"]'),
+    # Английский text — fallback
     lambda p: p.get_by_role("textbox", name="Email or phone"),
     lambda p: p.get_by_label("Email or phone"),
-    lambda p: p.locator('input[autocomplete="webauthn"]'),
-    lambda p: p.locator('input[name="session_key"]'),
-    lambda p: p.locator('input#username'),
-    lambda p: p.locator('form input[type="text"]'),
+    # Самый широкий: первый visible text-input
+    lambda p: p.locator('form input[type="text"]:visible').first,
+    lambda p: p.locator('form input:visible').first,
 ]
 
 PASSWORD_LOCATORS = [
@@ -37,10 +47,25 @@ PASSWORD_LOCATORS = [
 ]
 
 SUBMIT_LOCATORS = [
-    lambda p: p.locator("form").get_by_role("button", name="Sign in", exact=True),
-    lambda p: p.get_by_role("button", name="Sign in", exact=True),
+    # Точный селектор из реального HTML LinkedIn login (любой язык UI)
+    lambda p: p.locator('button[data-id="organic-login-submit-button"]'),
+    lambda p: p.locator('button[id*="organic-login-submit"]'),
+    lambda p: p.locator('button[id*="login-submit"]'),
+    # type=submit (если есть)
     lambda p: p.locator('form button[type="submit"]'),
     lambda p: p.locator('button[type="submit"]'),
+    # Английский text
+    lambda p: p.locator("form").get_by_role("button", name="Sign in", exact=True),
+    lambda p: p.get_by_role("button", name="Sign in", exact=True),
+    # Прочие fallback
+    lambda p: p.locator('button[aria-label*="Sign in" i]'),
+    lambda p: p.locator('button.from__button--floating'),
+    lambda p: p.locator('button.btn__primary--large'),
+    lambda p: p.locator('form button.artdeco-button--primary'),
+    # Самые широкие — любая видимая кнопка в форме
+    lambda p: p.locator('form.login__form button:visible').last,
+    lambda p: p.locator('form button:visible').last,
+    lambda p: p.locator('button:visible').last,
 ]
 
 COMPLY_LOCATORS = [
@@ -50,6 +75,17 @@ COMPLY_LOCATORS = [
 ]
 
 COMPLY_PROBE_TIMEOUT_MS = 5000
+
+PROFILE_BROWSER_FIELDS = [
+    "cookie_data",
+    "browser_user_agent",
+    "browser_locale",
+    "browser_timezone",
+    "browser_is_mobile",
+    "browser_has_touch",
+    "browser_viewport_width",
+    "browser_viewport_height",
+]
 
 
 def dismiss_comply_gate(page, timeout_ms: int = COMPLY_PROBE_TIMEOUT_MS) -> bool:
@@ -78,9 +114,18 @@ def playwright_login(session: "AccountSession"):
         error_message="Failed to load login page",
     )
 
-    human_type(resolve_locator(page, EMAIL_LOCATORS), lp.linkedin_username)
-    session.wait()
-    human_type(resolve_locator(page, PASSWORD_LOCATORS), lp.linkedin_password)
+    email_locator = _maybe_resolve_locator(page, EMAIL_LOCATORS, timeout_per_ms=3000)
+    password_locator = _maybe_resolve_locator(page, PASSWORD_LOCATORS, timeout_per_ms=3000)
+
+    if email_locator is not None:
+        human_type(email_locator, lp.linkedin_username)
+        session.wait()
+        password_locator = resolve_locator(page, PASSWORD_LOCATORS)
+
+    if password_locator is None:
+        password_locator = resolve_locator(page, PASSWORD_LOCATORS)
+
+    human_type(password_locator, lp.linkedin_password)
     session.wait()
 
     submit = resolve_locator(page, SUBMIT_LOCATORS)
@@ -95,16 +140,117 @@ def playwright_login(session: "AccountSession"):
     )
 
 
-def launch_browser(storage_state=None):
+def _maybe_resolve_locator(page, candidates, timeout_per_ms: int = 3000):
+    try:
+        return resolve_locator(page, candidates, timeout_per_ms=timeout_per_ms)
+    except RuntimeError:
+        return None
+
+
+def launch_browser(storage_state=None, linkedin_profile=None):
     logger.debug("Launching Playwright")
     playwright = sync_playwright().start()
-    browser = playwright.chromium.launch(headless=False, slow_mo=BROWSER_SLOW_MO)
-    context = browser.new_context(storage_state=storage_state)
+    launch_options = {
+        "headless": False,
+        "slow_mo": BROWSER_SLOW_MO,
+        "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+    }
+    proxy_options = _proxy_options()
+    if proxy_options:
+        launch_options["proxy"] = proxy_options
+    browser = playwright.chromium.launch(**launch_options)
+    context = browser.new_context(
+        **_context_options(storage_state=storage_state, linkedin_profile=linkedin_profile),
+    )
     context.set_default_timeout(BROWSER_DEFAULT_TIMEOUT_MS)
     context.set_default_navigation_timeout(BROWSER_DEFAULT_TIMEOUT_MS)
     Stealth().apply_stealth_sync(context)
     page = context.new_page()
     return page, context, browser, playwright
+
+
+def _context_options(storage_state=None, linkedin_profile=None) -> dict:
+    options = {}
+    if storage_state:
+        options["storage_state"] = storage_state
+
+    user_agent = _profile_or_env(linkedin_profile, "browser_user_agent", "LINKEDIN_USER_AGENT")
+    locale = _profile_or_env(linkedin_profile, "browser_locale", "LINKEDIN_LOCALE")
+    timezone_id = _profile_or_env(linkedin_profile, "browser_timezone", "LINKEDIN_TIMEZONE")
+    viewport_width = _profile_or_env_int(
+        linkedin_profile,
+        "browser_viewport_width",
+        "LINKEDIN_VIEWPORT_WIDTH",
+        default=1365,
+    )
+    viewport_height = _profile_or_env_int(
+        linkedin_profile,
+        "browser_viewport_height",
+        "LINKEDIN_VIEWPORT_HEIGHT",
+        default=768,
+    )
+    is_mobile = _profile_or_env_bool(linkedin_profile, "browser_is_mobile", "LINKEDIN_IS_MOBILE")
+    has_touch = _profile_or_env_bool(linkedin_profile, "browser_has_touch", "LINKEDIN_HAS_TOUCH")
+
+    if user_agent:
+        options["user_agent"] = user_agent
+    if locale:
+        options["locale"] = locale
+    if timezone_id:
+        options["timezone_id"] = timezone_id
+    if viewport_width and viewport_height:
+        options["viewport"] = {"width": viewport_width, "height": viewport_height}
+    if is_mobile:
+        options["is_mobile"] = True
+    if has_touch:
+        options["has_touch"] = True
+
+    return options
+
+
+def _profile_or_env(linkedin_profile, profile_field: str, env_name: str) -> str:
+    value = getattr(linkedin_profile, profile_field, "") if linkedin_profile else ""
+    return str(value or os.getenv(env_name, "")).strip()
+
+
+def _profile_or_env_int(linkedin_profile, profile_field: str, env_name: str, default: int) -> int:
+    value = getattr(linkedin_profile, profile_field, None) if linkedin_profile else None
+    if value in (None, ""):
+        value = os.getenv(env_name)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _profile_or_env_bool(linkedin_profile, profile_field: str, env_name: str) -> bool:
+    value = getattr(linkedin_profile, profile_field, None) if linkedin_profile else None
+    if value is None:
+        value = os.getenv(env_name)
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _proxy_options() -> dict | None:
+    proxy_server = os.getenv("PROXY_SERVER", "").strip()
+    if not proxy_server:
+        return None
+
+    parsed = urlparse(proxy_server)
+    if parsed.scheme and parsed.hostname:
+        server = f"{parsed.scheme}://{parsed.hostname}"
+        if parsed.port:
+            server += f":{parsed.port}"
+        options = {"server": server}
+        if parsed.username:
+            options["username"] = parsed.username
+        if parsed.password:
+            options["password"] = parsed.password
+        return options
+
+    return {"server": proxy_server}
 
 
 def _save_cookies(session):
@@ -117,29 +263,40 @@ def _save_cookies(session):
 def start_browser_session(session: "AccountSession"):
     logger.debug("Configuring browser for %s", session)
 
-    session.linkedin_profile.refresh_from_db(fields=["cookie_data"])
+    session.linkedin_profile.refresh_from_db(fields=PROFILE_BROWSER_FIELDS)
     cookie_data = session.linkedin_profile.cookie_data
 
     storage_state = cookie_data if cookie_data else None
     if storage_state:
         logger.info("Loading saved session for %s", session)
 
-    session.page, session.context, session.browser, session.playwright = launch_browser(storage_state=storage_state)
+    session.page, session.context, session.browser, session.playwright = launch_browser(
+        storage_state=storage_state,
+        linkedin_profile=session.linkedin_profile,
+    )
 
     if not storage_state:
         playwright_login(session)
         _save_cookies(session)
         logger.info(colored("Login successful – session saved", "green", attrs=["bold"]))
     else:
-        session.page.goto(LINKEDIN_FEED_URL)
-        dismiss_comply_gate(session.page)
-        goto_page(
-            session,
-            action=lambda: None,
-            expected_url_pattern="/feed",
-            timeout=BROWSER_DEFAULT_TIMEOUT_MS,
-            error_message="Saved session invalid",
-        )
+        try:
+            session.page.goto(LINKEDIN_FEED_URL)
+            dismiss_comply_gate(session.page)
+            goto_page(
+                session,
+                action=lambda: None,
+                expected_url_pattern="/feed",
+                timeout=BROWSER_DEFAULT_TIMEOUT_MS,
+                error_message="Saved session invalid",
+            )
+        except RuntimeError as exc:
+            logger.warning("Saved LinkedIn session invalid for %s: %s", session, exc)
+            session.linkedin_profile.cookie_data = None
+            session.linkedin_profile.save(update_fields=["cookie_data"])
+            playwright_login(session)
+            _save_cookies(session)
+            logger.info(colored("Login successful – session saved", "green", attrs=["bold"]))
 
     session.page.wait_for_load_state("load")
     logger.info(colored("Browser ready", "green", attrs=["bold"]))

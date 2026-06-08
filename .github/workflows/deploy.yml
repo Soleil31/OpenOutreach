@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: eracle/openoutreach
+  IMAGE_NAME: soleil31/openoutreach
 
 jobs:
   test:
