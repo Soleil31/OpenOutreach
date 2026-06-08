@@ -84,7 +84,8 @@ def missing_keys() -> set[str]:
     cfg = SiteConfig.load()
     if not cfg.llm_provider:
         keys.add("llm_provider")
-    if not cfg.llm_api_key:
+    # codex provider uses ChatGPT OAuth (auth.json), not an API key.
+    if cfg.llm_provider != SiteConfig.LLMProvider.CODEX and not cfg.llm_api_key:
         keys.add("llm_api_key")
     if not cfg.ai_model:
         keys.add("ai_model")
