@@ -96,11 +96,15 @@ _PROVIDER_BUILDERS = {
 # ── Public API ──
 
 def _validated_site_config():
-    """Load `SiteConfig` and assert the required LLM fields are populated."""
+    """Load `SiteConfig` and assert the required LLM fields are populated.
+
+    ``llm_api_key`` is only required for API-key based providers; codex
+    authenticates via ChatGPT OAuth (``auth.json``) and has no api_key.
+    """
     from linkedin.models import SiteConfig
 
     cfg = SiteConfig.load()
-    if not cfg.llm_api_key:
+    if cfg.llm_provider != SiteConfig.LLMProvider.CODEX and not cfg.llm_api_key:
         raise ValueError("LLM_API_KEY is not set in Site Configuration.")
     if not cfg.ai_model:
         raise ValueError("AI_MODEL is not set in Site Configuration.")
@@ -117,8 +121,15 @@ def get_llm_model():
 
 
 def is_codex_provider() -> bool:
-    """Return True when SiteConfig.llm_provider == 'codex'."""
+    """Return True when SiteConfig.llm_provider == 'codex'.
+
+    Reads SiteConfig directly — does NOT go through ``_validated_site_config``
+    because that one used to raise on missing api_key, hiding codex behind
+    its own guard.
+    """
+    from linkedin.models import SiteConfig
+
     try:
-        return _validated_site_config().llm_provider == "codex"
+        return SiteConfig.load().llm_provider == SiteConfig.LLMProvider.CODEX
     except Exception:
         return False
