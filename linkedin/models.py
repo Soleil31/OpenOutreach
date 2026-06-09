@@ -73,6 +73,27 @@ class Campaign(models.Model):
     # Posting
     posting_enabled = models.BooleanField(default=False)
     post_system_prompt = models.TextField(blank=True, default="")
+    post_prompt_template = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Шаблон системного промпта для генерации текста поста. "
+            "Доступные подстановки: {self_name}, {product_docs}, "
+            "{post_system_prompt}, {topic}, {language}, "
+            "{hashtags_instruction}, {cta_instruction}. "
+            "Если оставить пустым — используется встроенный дефолт."
+        ),
+    )
+    cover_text_prompt_template = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Шаблон промпта для генерации короткой фразы-overlay на "
+            "обложке (5–9 слов). Подстановки: {post_text}, {topic}, "
+            "{language}. Если оставить пустым — используется встроенный "
+            "дефолт."
+        ),
+    )
     post_timezone = models.CharField(max_length=64, blank=True, default="UTC")
     post_days_of_week = models.JSONField(blank=True, default=list)
     post_times = models.JSONField(blank=True, default=list)

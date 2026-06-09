@@ -104,6 +104,18 @@ class CampaignAdmin(admin.ModelAdmin):
                 "post_approval_timeout_hours",
             ),
         }),
+        ("Posting — Prompt templates (advanced)", {
+            "description": (
+                "Шаблоны промптов для AI-генерации постов и обложек. "
+                "Если оставить пустыми — используются встроенные дефолты. "
+                "Доступные подстановки описаны под каждым полем."
+            ),
+            "fields": (
+                "post_prompt_template",
+                "cover_text_prompt_template",
+            ),
+            "classes": ("collapse",),
+        }),
     )
 
 
