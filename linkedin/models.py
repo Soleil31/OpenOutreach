@@ -17,6 +17,50 @@ _RATE_LIMIT_FIELDS = {
 }
 
 
+# ── Prompt-template defaults & help text ────────────────────────────
+# Used by Campaign.post_prompt_template / cover_text_prompt_template.
+# Defined as callables so each new Campaign row gets the current
+# default at creation time (Django invokes the callable, persists the
+# string). Editors who clear the field land at the same default the
+# next time a save reads the default.
+
+def _default_post_prompt_template() -> str:
+    from linkedin.agents.post_prompt_defaults import DEFAULT_POST_TEMPLATE
+    return DEFAULT_POST_TEMPLATE
+
+
+def _default_cover_text_prompt_template() -> str:
+    from linkedin.agents.post_prompt_defaults import DEFAULT_COVER_TEMPLATE
+    return DEFAULT_COVER_TEMPLATE
+
+
+_POST_PROMPT_HELP = (
+    "Системный промпт для AI-генератора текста поста. Пишется как "
+    "обычный текст с подстановками в фигурных скобках, например "
+    "{topic} или {product_docs}.\n\n"
+    "Подстановки:\n"
+    "  • {self_name} — имя автора (из LinkedIn-профиля бота)\n"
+    "  • {product_docs} — описание компании (поле выше)\n"
+    "  • {post_system_prompt} — правила стиля (поле выше)\n"
+    "  • {topic} — тема конкретного поста (из Post Topic)\n"
+    "  • {language} — язык (из настройки Post language)\n"
+    "  • {hashtags_instruction} — инструкция «добавь N хэштегов» "
+    "(автоматически собирается)\n"
+    "  • {cta_instruction} — инструкция «добавь CTA» (если задан)\n\n"
+    "Если очистить поле и сохранить — снова появится дефолт."
+)
+
+_COVER_PROMPT_HELP = (
+    "Промпт для AI, который пишет короткую фразу-подпись (5–9 слов) "
+    "поверх Figma-обложки.\n\n"
+    "Подстановки:\n"
+    "  • {post_text} — уже сгенерированный текст поста\n"
+    "  • {topic} — тема (из Post Topic)\n"
+    "  • {language} — язык (из настройки Post language)\n\n"
+    "Если очистить поле и сохранить — снова появится дефолт."
+)
+
+
 class SiteConfig(models.Model):
     """Singleton model for global site configuration (LLM keys, etc.)."""
 
@@ -75,24 +119,13 @@ class Campaign(models.Model):
     post_system_prompt = models.TextField(blank=True, default="")
     post_prompt_template = models.TextField(
         blank=True,
-        default="",
-        help_text=(
-            "Шаблон системного промпта для генерации текста поста. "
-            "Доступные подстановки: {self_name}, {product_docs}, "
-            "{post_system_prompt}, {topic}, {language}, "
-            "{hashtags_instruction}, {cta_instruction}. "
-            "Если оставить пустым — используется встроенный дефолт."
-        ),
+        default=_default_post_prompt_template,
+        help_text=_POST_PROMPT_HELP,
     )
     cover_text_prompt_template = models.TextField(
         blank=True,
-        default="",
-        help_text=(
-            "Шаблон промпта для генерации короткой фразы-overlay на "
-            "обложке (5–9 слов). Подстановки: {post_text}, {topic}, "
-            "{language}. Если оставить пустым — используется встроенный "
-            "дефолт."
-        ),
+        default=_default_cover_text_prompt_template,
+        help_text=_COVER_PROMPT_HELP,
     )
     post_timezone = models.CharField(max_length=64, blank=True, default="UTC")
     post_days_of_week = models.JSONField(blank=True, default=list)
@@ -104,6 +137,16 @@ class Campaign(models.Model):
 
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        # Auto-reset prompt templates to the bundled defaults when the
+        # editor clears the field — keeps "clear and save to restore"
+        # honest instead of leaving an empty textarea.
+        if not (self.post_prompt_template or "").strip():
+            self.post_prompt_template = _default_post_prompt_template()
+        if not (self.cover_text_prompt_template or "").strip():
+            self.cover_text_prompt_template = _default_cover_text_prompt_template()
+        super().save(*args, **kwargs)
 
     class Meta:
         app_label = "linkedin"

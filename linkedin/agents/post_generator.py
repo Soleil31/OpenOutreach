@@ -2,62 +2,26 @@
 """LLM agents that generate the post text and the cover overlay phrase.
 
 Both prompt templates live on the Campaign row (``post_prompt_template``,
-``cover_text_prompt_template``), so a non-developer can tweak them in
-the Django Admin. If a campaign leaves a template blank we fall back to
-the built-in default below — this keeps the system usable out of the
-box while letting any editor override it.
+``cover_text_prompt_template``) so a non-developer can tweak them in the
+Django Admin. New campaigns are seeded with sensible defaults from
+``post_prompt_defaults`` (via the ``Campaign.*.default`` Django field +
+the seed data migration), so an editor sees a working template the
+first time they open the form — no "what do I write here" problem.
 
 Substitution is plain ``str.format(**ctx)`` — no Jinja, no engine, no
-``j2`` file on disk. Every placeholder the template can use is listed
-in the ``help_text`` on the Campaign field so editors can copy-paste.
+``j2`` file on disk. The Admin's ``help_text`` lists every placeholder.
 """
 from __future__ import annotations
 
 import logging
 
+from linkedin.agents.post_prompt_defaults import (
+    DEFAULT_COVER_TEMPLATE,
+    DEFAULT_POST_TEMPLATE,
+)
 from linkedin.llm import is_codex_provider
 
 logger = logging.getLogger(__name__)
-
-
-# ── Built-in defaults ────────────────────────────────────────────────
-#
-# These are used only when Campaign.post_prompt_template /
-# cover_text_prompt_template are empty. The Admin field's help_text
-# shows the same substitutions; editors can paste from here as a
-# starting point.
-
-DEFAULT_POST_TEMPLATE = """\
-Ты — {self_name}, представитель компании. Пишешь профессиональные посты для LinkedIn.
-
-О компании:
-{product_docs}
-
-Правила оформления постов:
-{post_system_prompt}
-
-Напиши пост на тему: «{topic}»
-
-Язык: {language}.
-{hashtags_instruction}
-{cta_instruction}
-
-Не используй вступление «Привет, друзья!» и подобные клише.
-Не объясняй что ты — сразу к делу.
-Не оборачивай ответ в кавычки или markdown — просто текст поста.
-"""
-
-DEFAULT_COVER_TEMPLATE = """\
-Ты редактор. Прочитай пост ниже и сформулируй ОДНУ короткую фразу для обложки (5–9 слов на {language}).
-Фраза должна цеплять и передавать суть. Без точки в конце, без кавычек, без хэштегов.
-
-Тема поста: «{topic}»
-
-Текст поста:
-{post_text}
-
-Верни ТОЛЬКО фразу. Ничего больше — ни пояснений, ни вариантов.
-"""
 
 
 # ── Public API ───────────────────────────────────────────────────────
