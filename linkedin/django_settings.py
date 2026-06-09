@@ -91,3 +91,16 @@ USE_I18N = True
 USE_TZ = True
 
 TESTING = sys.argv[1:2] == ["test"]
+
+# When running behind an nginx reverse proxy that terminates HTTPS and
+# forwards plain HTTP to the container, Django needs to trust the
+# external origin for CSRF and treat the request as secure when nginx
+# sets ``X-Forwarded-Proto: https``. Both production domains are listed;
+# each container only ever sees requests for its own one (the other
+# domain lives on a different host) so cross-contamination is impossible.
+CSRF_TRUSTED_ORIGINS = [
+    "https://link1.owlwebstudio.com",
+    "https://link2.owlwebstudio.com",
+]
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
