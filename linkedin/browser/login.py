@@ -153,7 +153,19 @@ def launch_browser(storage_state=None, linkedin_profile=None):
     launch_options = {
         "headless": False,
         "slow_mo": BROWSER_SLOW_MO,
-        "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+        "args": [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            # The VPS has no real GPU, so Chromium falls back to SwiftShader
+            # (software GPU emulation via ANGLE/Vulkan). SwiftShader crashes
+            # the renderer process ("Target crashed") on heavy desktop
+            # LinkedIn pages — confirmed in the renderer crash dump. Force a
+            # pure-CPU render path and disable the SwiftShader fallback so
+            # the DOM still renders for UI automation without the GPU layer.
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--disable-gpu-compositing",
+        ],
     }
     proxy_options = _proxy_options()
     if proxy_options:
