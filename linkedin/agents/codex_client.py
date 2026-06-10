@@ -1,10 +1,27 @@
-"""Python port of owlgram/pkg/codexgateway/exec.go — direct Codex CLI subprocess wrapper."""
+"""HTTP client for the owlgram codex-gateway.
+
+Replaces the previous local ``codex exec`` subprocess wrapper. Instead of
+running the Codex CLI on each server (which needs a per-host ``auth.json``
+that expires and conflicts when shared), we POST to a central
+codex-gateway over an SSH tunnel. The gateway holds the ChatGPT auth in
+one place and refreshes it itself — so the bots never see a 401.
+
+Wire protocol (owlgram/pkg/codexgateway/client.go):
+    POST {CODEX_GATEWAY_URL}/v1/chat
+    body  {model, system_prompt, user_prompt, json_response, json_schema, ...}
+    resp  {content, provider, model, usage}
+
+Reachability: the gateway listens on 127.0.0.1:18789 on OwlwebMain; an
+autossh systemd unit on each LinkedIn server forwards it to the host's
+0.0.0.0:18789, and the openoutreach container reaches it via
+``host.docker.internal`` (extra_hosts: host-gateway).
+"""
 from __future__ import annotations
 
 import json
 import os
-import subprocess
-import tempfile
+import urllib.error
+import urllib.request
 from typing import Any
 
 
@@ -13,19 +30,15 @@ class CodexClient:
 
     def __init__(
         self,
-        binary: str = "codex",
+        gateway_url: str,
         model: str = DEFAULT_MODEL,
         timeout: float = 120.0,
-        work_dir: str | None = None,
-        ssl_cert: str | None = None,
-        proxy: str | None = None,
+        token: str = "",
     ) -> None:
-        self.binary = binary or "codex"
+        self.gateway_url = (gateway_url or "").rstrip("/")
         self.model = self._normalize_model(model) or self.DEFAULT_MODEL
         self.timeout = timeout if timeout > 0 else 120.0
-        self.work_dir = work_dir or tempfile.gettempdir()
-        self.ssl_cert = (ssl_cert or "").strip()
-        self.proxy = (proxy or "").strip()
+        self.token = (token or "").strip()
 
     # ------------------------------------------------------------------
     # Public API
@@ -41,82 +54,51 @@ class CodexClient:
         assistant_prefill: str = "",
         json_schema: Any = None,
     ) -> str:
-        os.makedirs(self.work_dir, exist_ok=True)
+        if not self.gateway_url:
+            raise RuntimeError("CODEX_GATEWAY_URL is not set")
 
-        out_fd, out_path = tempfile.mkstemp(prefix="openoutreach-codex-output-", suffix=".txt")
-        os.close(out_fd)
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "json_response": json_response,
+        }
+        if max_tokens > 0:
+            payload["max_tokens"] = max_tokens
+        if stop:
+            payload["stop"] = stop
+        if assistant_prefill:
+            payload["assistant_prefill"] = assistant_prefill
+        if json_schema is not None:
+            # OpenAI structured-output requires additionalProperties:false on
+            # every object node; Pydantic doesn't emit it, so we inject it
+            # before sending. Harmless if the gateway also strictifies.
+            payload["json_schema"] = _strictify_schema(json_schema)
 
-        schema_path: str | None = None
+        data = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        request = urllib.request.Request(
+            f"{self.gateway_url}/v1/chat", data=data, headers=headers, method="POST",
+        )
         try:
-            args = [
-                self.binary, "exec",
-                "--ephemeral",
-                "--skip-git-repo-check",
-                # Patch: codex 0.130.0 renamed --no-sandbox →
-                # --dangerously-bypass-approvals-and-sandbox.
-                "--dangerously-bypass-approvals-and-sandbox",
-                "-C", self.work_dir,
-                "-m", self.model,
-                "-o", out_path,
-            ]
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:500]
+            raise RuntimeError(
+                f"codex gateway HTTP {exc.code}: {detail}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"codex gateway unreachable: {exc.reason}") from exc
 
-            if json_schema is not None:
-                s_fd, schema_path = tempfile.mkstemp(
-                    prefix="openoutreach-codex-schema-", suffix=".json"
-                )
-                # Patch: OpenAI structured-output requires `additionalProperties: false`
-                # on every object schema; Pydantic doesn't emit it. We walk the tree
-                # in-place once before handing the file to codex.
-                with os.fdopen(s_fd, "w") as f:
-                    json.dump(_strictify_schema(json_schema), f, indent=2)
-                args.extend(["--output-schema", schema_path])
-
-            args.append("-")
-
-            prompt = self._build_prompt(
-                system_prompt, user_prompt, json_response, max_tokens, assistant_prefill
-            )
-
-            result = subprocess.run(
-                args,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                cwd=self.work_dir,
-                env=self._build_env(),
-            )
-
-            if result.returncode != 0:
-                output = (result.stderr + result.stdout).strip()[:2000]
-                raise RuntimeError(f"codex exec failed: {output}")
-
-            with open(out_path) as f:
-                content = f.read().strip()
-
-            if stop:
-                content = self._apply_stop_sequences(content, stop)
-            if json_response:
-                content = self._strip_json_fence(content)
-            if assistant_prefill:
-                content = self._strip_generic_fence(content)
-
-            content = content.strip()
-            if not content:
-                raise RuntimeError("empty response from codex")
-
-            return content
-
-        finally:
-            try:
-                os.unlink(out_path)
-            except OSError:
-                pass
-            if schema_path:
-                try:
-                    os.unlink(schema_path)
-                except OSError:
-                    pass
+        parsed = json.loads(body)
+        content = (parsed.get("content") or "").strip()
+        if not content:
+            raise RuntimeError("empty response from codex gateway")
+        return content
 
     def chat_json(
         self,
@@ -125,7 +107,7 @@ class CodexClient:
         json_schema: Any = None,
     ) -> Any:
         content = self.chat(
-            system_prompt, user_prompt, json_response=True, json_schema=json_schema
+            system_prompt, user_prompt, json_response=True, json_schema=json_schema,
         )
         return json.loads(content)
 
@@ -140,99 +122,19 @@ class CodexClient:
         model = model.removeprefix("codex/")
         return model
 
-    def _build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        env["NO_COLOR"] = "1"
-        if self.ssl_cert:
-            env["SSL_CERT_FILE"] = self.ssl_cert
-        if self.proxy:
-            for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
-                env[key] = self.proxy
-        return env
-
-    def _build_prompt(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        json_response: bool,
-        max_tokens: int,
-        assistant_prefill: str,
-    ) -> str:
-        lines: list[str] = [
-            "You are a stateless text-generation backend for the OpenOutreach service.",
-            "Do not inspect files. Do not run shell commands. Do not mention Codex, tools, files, or this wrapper.",
-            "Return only the final answer requested by the prompts.",
-        ]
-        if json_response:
-            lines.append(
-                "Return exactly one valid JSON object. "
-                "No markdown, no code fences, no commentary before or after JSON."
-            )
-        if max_tokens > 0:
-            lines.append(
-                f"Keep the response compact; requested max output is about {max_tokens} tokens."
-            )
-        if assistant_prefill:
-            if "html" in assistant_prefill.lower():
-                lines.append(
-                    "Return a raw HTML fragment only. Do not wrap it in markdown or code fences."
-                )
-            else:
-                lines.append(
-                    f"Use this assistant prefill only as a formatting hint: {assistant_prefill}"
-                )
-
-        if system_prompt:
-            lines += ["", "<system>", system_prompt, "</system>"]
-        if user_prompt:
-            lines += ["", "<user>", user_prompt, "</user>"]
-        else:
-            lines += ["", "<user>", "Выполни задачу из системной инструкции.", "</user>"]
-
-        return "\n".join(lines) + "\n"
-
-    @staticmethod
-    def _apply_stop_sequences(content: str, stops: list[str]) -> str:
-        cut_at = -1
-        for stop in stops:
-            if not stop:
-                continue
-            idx = content.find(stop)
-            if idx >= 0 and (cut_at == -1 or idx < cut_at):
-                cut_at = idx
-        return content if cut_at == -1 else content[:cut_at]
-
-    @staticmethod
-    def _strip_json_fence(content: str) -> str:
-        content = content.strip()
-        if content.startswith("```json"):
-            content = content[7:].strip().rstrip("`").strip()
-        elif content.startswith("```"):
-            nl = content.find("\n")
-            if nl >= 0:
-                content = content[nl + 1:].rstrip("`").strip()
-        return content.strip()
-
-    @staticmethod
-    def _strip_generic_fence(content: str) -> str:
-        content = content.strip()
-        if not content.startswith("```"):
-            return content
-        nl = content.find("\n")
-        if nl >= 0:
-            content = content[nl + 1:]
-        return content.rstrip("`").strip()
-
 
 def get_codex_client() -> CodexClient:
-    """Construct CodexClient from env vars — mirrors owlgram's NewExecClient."""
+    """Construct a CodexClient pointed at the codex-gateway.
+
+    ``CODEX_GATEWAY_URL`` defaults to the autossh-forwarded gateway on the
+    docker host. ``CODEX_GATEWAY_TOKEN`` is optional (the gateway runs with
+    authorization disabled in our setup).
+    """
     return CodexClient(
-        binary=os.getenv("CODEX_BIN", "codex"),
+        gateway_url=os.getenv("CODEX_GATEWAY_URL", "http://host.docker.internal:18789"),
         model=os.getenv("CODEX_MODEL", CodexClient.DEFAULT_MODEL),
         timeout=float(os.getenv("CODEX_TIMEOUT_SECONDS", "120")),
-        work_dir=os.getenv("CODEX_WORKDIR") or tempfile.gettempdir(),
-        ssl_cert=os.getenv("CODEX_SSL_CERT_FILE", ""),
-        proxy=os.getenv("CODEX_PROXY") or os.getenv("CODEX_HTTPS_PROXY", ""),
+        token=os.getenv("CODEX_GATEWAY_TOKEN", ""),
     )
 
 
@@ -240,11 +142,11 @@ def _strictify_schema(schema):
     """Return a deep copy of ``schema`` with ``additionalProperties: false``
     forced on every object-type subschema.
 
-    OpenAI's structured-output JSON-schema validator (used by codex CLI's
-    ``--output-schema``) rejects schemas that don't explicitly disallow
-    extra properties. Pydantic's ``model_json_schema()`` doesn't emit it,
-    so we have to inject it ourselves. Walks ``properties``, ``items``,
-    ``anyOf``/``oneOf``/``allOf``, and ``$defs`` so nested models work too.
+    OpenAI's structured-output JSON-schema validator rejects schemas that
+    don't explicitly disallow extra properties. Pydantic's
+    ``model_json_schema()`` doesn't emit it, so we inject it ourselves.
+    Walks ``properties``, ``items``, ``anyOf``/``oneOf``/``allOf``, and
+    ``$defs`` so nested models work too.
     """
     import copy
 
