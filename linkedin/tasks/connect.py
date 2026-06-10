@@ -95,6 +95,22 @@ def handle_connect(task, session, qualifiers):
     public_id = candidate["public_identifier"]
     profile = candidate.get("profile") or candidate
 
+    # Outreach gate — soft "stop the invitations" switch.
+    # By this point the candidate has already been discovered AND
+    # qualified inside find_candidate(), so the vetted lead base keeps
+    # growing. When outreach is disabled we stop right here and never send
+    # the connection request — zero outgoing actions, account stays quiet.
+    # refresh_from_db so flipping the flag in Django Admin takes effect on
+    # the next connect task without restarting the daemon.
+    campaign.refresh_from_db(fields=["outreach_enabled"])
+    if not campaign.outreach_enabled:
+        logger.info(
+            "[%s] outreach disabled — %s qualified, invitation skipped",
+            campaign, public_id,
+        )
+        _reschedule()
+        return
+
     # Freemium campaigns need a Deal before set_profile_state
     if strategy.pre_connect:
         strategy.pre_connect(session, public_id)
