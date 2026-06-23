@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
 # VNC stack (started conditionally via ENABLE_VNC=true at runtime)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        gosu xvfb x11vnc python3-websockify curl nano \
+        gosu xvfb x11vnc python3-websockify curl nano tini \
     && curl -fsSL https://github.com/novnc/noVNC/archive/refs/tags/v1.6.0.tar.gz \
         | tar -xz -C /opt \
     && mv /opt/noVNC-1.6.0 /opt/noVNC \
@@ -51,5 +51,8 @@ RUN sed -i 's/\r$//g' /entrypoint /start && chmod +x /entrypoint /start
 COPY --chown=ubuntu:ubuntu . ${APP_HOME}
 RUN chown ubuntu:ubuntu ${APP_HOME}
 
-ENTRYPOINT ["/entrypoint"]
+# Run PID 1 under tini so orphaned Chromium/crashpad subprocesses (left behind
+# by browser restarts and crashes) get reaped instead of piling up as zombies
+# and exhausting the container PID limit.
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint"]
 CMD ["/start"]

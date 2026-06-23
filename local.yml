@@ -8,6 +8,11 @@ services:
       args:
         - BUILD_ENV=local
     restart: unless-stopped
+    # Reap zombie Chromium/crashpad subprocesses (belt-and-suspenders with the
+    # tini ENTRYPOINT) and keep headroom so repeated browser restarts can't
+    # exhaust the container PID table. Production compose files should set both.
+    init: true
+    pids_limit: 4096
     stdin_open: true
     tty: true
     environment:

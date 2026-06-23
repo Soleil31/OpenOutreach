@@ -140,13 +140,15 @@ def get_codex_client() -> CodexClient:
 
 def _strictify_schema(schema):
     """Return a deep copy of ``schema`` with ``additionalProperties: false``
-    forced on every object-type subschema.
+    and a complete ``required`` list forced on every object-type subschema.
 
     OpenAI's structured-output JSON-schema validator rejects schemas that
-    don't explicitly disallow extra properties. Pydantic's
-    ``model_json_schema()`` doesn't emit it, so we inject it ourselves.
-    Walks ``properties``, ``items``, ``anyOf``/``oneOf``/``allOf``, and
-    ``$defs`` so nested models work too.
+    don't explicitly disallow extra properties AND that don't mark every
+    property as required. Pydantic's ``model_json_schema()`` emits neither,
+    so we inject both ourselves — otherwise the gateway rejects the schema
+    (``codex exec`` exits 1 → HTTP 502) and every schema-typed call (e.g.
+    fact extraction in follow-ups) fails. Walks ``properties``, ``items``,
+    ``anyOf``/``oneOf``/``allOf``, and ``$defs`` so nested models work too.
     """
     import copy
 
@@ -155,6 +157,9 @@ def _strictify_schema(schema):
             t = node.get("type")
             if t == "object" and "additionalProperties" not in node:
                 node["additionalProperties"] = False
+            # OpenAI strict mode requires `required` to list every property.
+            if t == "object" and isinstance(node.get("properties"), dict):
+                node["required"] = list(node["properties"].keys())
             for key in ("properties", "patternProperties", "$defs", "definitions"):
                 inner = node.get(key)
                 if isinstance(inner, dict):
