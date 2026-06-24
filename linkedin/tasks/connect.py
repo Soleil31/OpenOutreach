@@ -86,7 +86,35 @@ def handle_connect(task, session, qualifiers):
         enqueue_connect(campaign_id, delay_seconds=seconds_until_tomorrow())
         return
 
-    # --- Get candidate ---
+    # --- Outreach gate (base-building mode) ---
+    # Checked BEFORE pulling a ready candidate. refresh_from_db so flipping the
+    # flag in Django Admin takes effect on the next task without a restart.
+    #
+    # When outreach is disabled we qualify a NEW candidate instead of pulling a
+    # ready one. A ready candidate only leaves the pool when an invitation is
+    # sent; with invitations off it never advances, so find_candidate would
+    # return the SAME profile every cycle and discovery would stall (the bug
+    # that pinned the daemon to one profile and starved the lead base).
+    # Qualifying grows the vetted base with zero outgoing actions.
+    campaign.refresh_from_db(fields=["outreach_enabled"])
+    if not campaign.outreach_enabled:
+        if campaign.is_freemium:
+            from linkedin.pipeline.freemium_pool import qualify_one_freemium
+            public_id = qualify_one_freemium(session, strategy.qualifier)
+        else:
+            from linkedin.pipeline.pools import qualify_one
+            public_id = qualify_one(session, strategy.qualifier)
+        if public_id:
+            logger.info(
+                "[%s] база-режим — квалифицирован новый: %s (connect отключён)",
+                campaign, public_id,
+            )
+            _reschedule()
+        else:
+            enqueue_connect(campaign_id, delay_seconds=cfg["connect_no_candidate_delay_seconds"])
+        return
+
+    # --- Get candidate (outreach enabled) ---
     candidate = strategy.find_candidate(session)
     if candidate is None:
         enqueue_connect(campaign_id, delay_seconds=cfg["connect_no_candidate_delay_seconds"])
@@ -94,22 +122,6 @@ def handle_connect(task, session, qualifiers):
 
     public_id = candidate["public_identifier"]
     profile = candidate.get("profile") or candidate
-
-    # Outreach gate — soft "stop the invitations" switch.
-    # By this point the candidate has already been discovered AND
-    # qualified inside find_candidate(), so the vetted lead base keeps
-    # growing. When outreach is disabled we stop right here and never send
-    # the connection request — zero outgoing actions, account stays quiet.
-    # refresh_from_db so flipping the flag in Django Admin takes effect on
-    # the next connect task without restarting the daemon.
-    campaign.refresh_from_db(fields=["outreach_enabled"])
-    if not campaign.outreach_enabled:
-        logger.info(
-            "[%s] outreach disabled — %s qualified, invitation skipped",
-            campaign, public_id,
-        )
-        _reschedule()
-        return
 
     # Freemium campaigns need a Deal before set_profile_state
     if strategy.pre_connect:

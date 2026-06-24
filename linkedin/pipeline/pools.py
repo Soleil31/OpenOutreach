@@ -159,3 +159,16 @@ def find_candidate(session, qualifier: BayesianQualifier) -> dict | None:
     find_freemium_candidate() from pipeline.freemium_pool instead.
     """
     return next(ready_source(session, qualifier), None)
+
+
+def qualify_one(session, qualifier: BayesianQualifier) -> str | None:
+    """Qualify a single NEW candidate (search + qualify) without touching the
+    ready pool.
+
+    Used in base-building mode (outreach disabled). The connect pipeline
+    advances a candidate out of the ready pool by sending an invitation; with
+    invitations off, a ready candidate is never promoted and find_candidate
+    would return the SAME profile forever — discovery stalls. Driving the
+    qualify_source directly keeps vetting NEW people so the lead base grows.
+    """
+    return next(qualify_source(session, qualifier), None)
