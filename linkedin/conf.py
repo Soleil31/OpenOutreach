@@ -1,6 +1,7 @@
 # linkedin/conf.py
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from linkedin.tz_detect import system_timezone
@@ -43,14 +44,41 @@ DEFAULT_CONNECT_WEEKLY_LIMIT = 100
 DEFAULT_FOLLOW_UP_DAILY_LIMIT = 25
 
 # ----------------------------------------------------------------------
-# Active-hours schedule (daemon pauses outside this window)
-# Set to False to run 24/7.
+# Active-hours schedule (daemon pauses outside this window).
+# All knobs are overridable via env so the schedule can be tuned without a
+# rebuild: ENABLE_ACTIVE_HOURS=false runs 24/7, ACTIVE_START_HOUR/
+# ACTIVE_END_HOUR shift the window, REST_DAYS="5,6" sets the days off
+# ("" = no rest days, run every day).
 # ----------------------------------------------------------------------
-ENABLE_ACTIVE_HOURS = True
-ACTIVE_START_HOUR = 9   # inclusive, local time
-ACTIVE_END_HOUR = 19    # exclusive, local time
-ACTIVE_TIMEZONE = system_timezone()
-REST_DAYS = (5, 6)      # 0=Mon … 6=Sun; default Sat+Sun off
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() not in ("false", "0", "no", "off")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+ENABLE_ACTIVE_HOURS = _env_bool("ENABLE_ACTIVE_HOURS", True)
+ACTIVE_START_HOUR = _env_int("ACTIVE_START_HOUR", 9)   # inclusive, local time
+ACTIVE_END_HOUR = _env_int("ACTIVE_END_HOUR", 19)      # exclusive, local time
+# Prefer the explicit account timezone (LINKEDIN_TIMEZONE — the same env that
+# drives the browser fingerprint) so the active-hours window tracks the
+# account's local time. Falls back to the container clock, which is UTC under
+# Docker — the bug that had DXB working 13-23 local instead of 9-19.
+ACTIVE_TIMEZONE = os.environ.get("LINKEDIN_TIMEZONE", "").strip() or system_timezone()
+# REST_DAYS: "5,6" = Sat+Sun off (default). Set REST_DAYS="" to run every day.
+_rest_raw = os.environ.get("REST_DAYS")
+if _rest_raw is None:
+    REST_DAYS = (5, 6)
+else:
+    REST_DAYS = tuple(int(x) for x in _rest_raw.split(",") if x.strip().isdigit())
 
 # ----------------------------------------------------------------------
 # Campaign config (timing + ML defaults — hardcoded, no YAML)

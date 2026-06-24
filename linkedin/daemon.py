@@ -5,7 +5,7 @@ import logging
 import random
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from django.utils import timezone
@@ -269,7 +269,11 @@ def seconds_until_active() -> float:
     if not ENABLE_ACTIVE_HOURS:
         return 0.0
     tz = ZoneInfo(ACTIVE_TIMEZONE)
-    now = timezone.localtime(timezone=tz)
+    # datetime.now(tz) reliably yields wall-clock time in the account's
+    # timezone. django timezone.localtime(timezone=tz) was returning UTC here
+    # (TIME_ZONE=UTC), so the 9-19 window was applied to UTC — shifting DXB's
+    # real window to 13-23 local and starving daytime hours.
+    now = datetime.now(tz)
 
     if now.weekday() not in REST_DAYS and ACTIVE_START_HOUR <= now.hour < ACTIVE_END_HOUR:
         return 0.0
@@ -324,7 +328,7 @@ def run_daemon(session):
         len(campaigns),
     )
 
-    cloud_promo = _CloudPromoRotator(interval=60)
+    cloud_promo = _CloudPromoRotator(interval=86400)
     heartbeat = Heartbeat()
     rhythm = _HumanRhythmBreak(heartbeat)
 
