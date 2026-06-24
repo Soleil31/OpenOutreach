@@ -151,6 +151,14 @@ def _dismiss_gdpr_if_present(page: Page) -> None:
             continue
 
 
+def _click_robust(element) -> None:
+    """Click past LinkedIn's #interop-outlet overlay via JS if it intercepts."""
+    try:
+        element.click(timeout=8_000)
+    except PWTimeout:
+        element.evaluate("el => el.click()")
+
+
 def _open_composer(page: Page) -> None:
     """Open the LinkedIn post composer modal on a desktop page.
 
@@ -189,7 +197,7 @@ def _open_composer(page: Page) -> None:
             continue
     if not start_btn:
         raise RuntimeError("Could not open post composer (deep-link + trigger both failed)")
-    start_btn.click()
+    _click_robust(start_btn)
     time.sleep(1.5)
 
     for sel in _POST_EDITOR_SELECTORS:
@@ -228,7 +236,7 @@ def publish_text_post(session, text: str) -> None:
         editor = _find_first(page, _POST_EDITOR_SELECTORS, timeout_ms=5_000)
         if not editor:
             raise RuntimeError("Post editor did not open")
-        editor.click()
+        _click_robust(editor)
         time.sleep(0.4)
         editor.fill(text)
         time.sleep(1)
@@ -236,7 +244,7 @@ def publish_text_post(session, text: str) -> None:
         submit_btn = _find_first(page, _SUBMIT_SELECTORS, timeout_ms=5_000)
         if not submit_btn:
             raise RuntimeError("Could not find Post submit button")
-        submit_btn.click()
+        _click_robust(submit_btn)
         logger.info("Post submit clicked, waiting for confirmation")
         time.sleep(4)
 
@@ -305,7 +313,7 @@ def publish_image_post(session, text: str, image_path) -> None:
         editor = _find_first(page, _POST_EDITOR_SELECTORS, timeout_ms=5_000)
         if not editor:
             raise RuntimeError("Post editor did not open")
-        editor.click()
+        _click_robust(editor)
         time.sleep(0.4)
         editor.fill(text)
         time.sleep(1)
@@ -313,7 +321,7 @@ def publish_image_post(session, text: str, image_path) -> None:
         media_btn = _find_first(page, _ADD_MEDIA_SELECTORS, timeout_ms=5_000)
         if not media_btn:
             raise RuntimeError("Could not find 'Add media' button in composer")
-        media_btn.click()
+        _click_robust(media_btn)
         time.sleep(1)
 
         # LinkedIn keeps the hidden <input type=file> in the DOM even when
@@ -327,13 +335,13 @@ def publish_image_post(session, text: str, image_path) -> None:
         # extra time — LinkedIn does server-side processing here).
         done_btn = _find_first(page, _DONE_AFTER_UPLOAD_SELECTORS, timeout_ms=15_000)
         if done_btn:
-            done_btn.click()
+            _click_robust(done_btn)
             time.sleep(2)
 
         submit_btn = _find_first(page, _SUBMIT_SELECTORS, timeout_ms=10_000)
         if not submit_btn:
             raise RuntimeError("Could not find Post submit button after media upload")
-        submit_btn.click()
+        _click_robust(submit_btn)
         logger.info("Image post submit clicked, waiting for upload to finalize")
         time.sleep(5)
 
