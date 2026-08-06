@@ -4,22 +4,73 @@ Single boundary for LLM construction. Call sites import `get_llm_model()` and
 hand the result to `pydantic_ai.Agent(...)`. Provider-specific routing lives
 here so the rest of the codebase stays provider-agnostic.
 
-Importing this module also applies ``nest_asyncio`` once. pydantic-ai's
-``Agent.run_sync`` wraps an async ``run`` in ``loop.run_until_complete``;
-something in its internals (anyio task group / portal) leaves the daemon
-thread's running-loop slot populated across calls, which trips the
-re-entrancy guard in ``BaseEventLoop._check_running`` on every subsequent
-``run_sync`` (``RuntimeError: This/Cannot run the event loop``). The
-official pydantic-ai troubleshooting recipe — same one used for Jupyter /
-Colab / Marimo — is ``nest_asyncio.apply()``, which patches the loop to
-allow nested ``run_until_complete``. See:
-https://pydantic.dev/docs/ai/overview/troubleshooting/
+Agents are run through :func:`run_agent`, never through ``Agent.run_sync``.
+
+Why: ``run_sync`` wraps the async ``run`` in ``loop.run_until_complete``, and
+something in pydantic-ai's internals (anyio task group / portal) leaves the
+calling thread's running-loop slot populated afterwards. Every subsequent
+``run_sync`` then trips the re-entrancy guard in
+``BaseEventLoop._check_running``.
+
+This module used to paper over that with ``nest_asyncio.apply()``. That fixed
+the LLM calls and silently broke the browser: Playwright's sync API refuses to
+start when the thread has a running loop, so the daemon died with
+
+    It looks like you are using Playwright Sync API inside the asyncio loop.
+
+on every ``launch_browser`` that happened after any LLM call. In practice the
+account stopped collecting leads entirely while the container looked healthy —
+tasks were not even marked failed, so the metrics showed nothing wrong.
+
+Instead of patching the caller's loop, LLM calls now run on their own event
+loop in a dedicated thread. The calling thread is never touched, so Playwright
+keeps working. The loop is long-lived on purpose: provider clients
+(AsyncOpenAI, AsyncAnthropic, ...) cache connections bound to the loop that
+created them, and a fresh ``asyncio.run`` per call would invalidate them.
 """
 from __future__ import annotations
 
-import nest_asyncio
+import asyncio
+import threading
 
-nest_asyncio.apply()
+
+class _AgentLoop:
+    """A private event loop living on its own thread.
+
+    Started lazily so importing this module stays free for code paths that
+    never touch an LLM.
+    """
+
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._lock = threading.Lock()
+
+    def _ensure_running(self) -> asyncio.AbstractEventLoop:
+        with self._lock:
+            if self._loop is None:
+                loop = asyncio.new_event_loop()
+                threading.Thread(
+                    target=loop.run_forever,
+                    name="llm-agent-loop",
+                    daemon=True,
+                ).start()
+                self._loop = loop
+            return self._loop
+
+    def run(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self._ensure_running()).result()
+
+
+_AGENT_LOOP = _AgentLoop()
+
+
+def run_agent(agent, *args, **kwargs):
+    """Run a pydantic-ai agent from synchronous code.
+
+    Drop-in replacement for ``agent.run_sync(...)``. Blocks until the agent
+    finishes and returns the same result object.
+    """
+    return _AGENT_LOOP.run(agent.run(*args, **kwargs))
 
 
 # Override the SDK default of 2. Each retry uses the SDK's built-in jittered

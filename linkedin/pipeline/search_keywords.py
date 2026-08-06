@@ -29,7 +29,7 @@ def generate_search_keywords(
     """
     from pydantic_ai import Agent
 
-    from linkedin.llm import get_llm_model
+    from linkedin.llm import get_llm_model, run_agent
 
     env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(PROMPTS_DIR)))
     template = env.get_template("search_keywords.j2")
@@ -56,7 +56,7 @@ def generate_search_keywords(
             output_type=SearchKeywords,
             model_settings={"temperature": 0.9},
         )
-        result = agent.run_sync(prompt).output
+        result = run_agent(agent, prompt).output
 
     logger.info("Generated %d search keywords via LLM", len(result.keywords))
     return result.keywords

@@ -170,14 +170,40 @@ def launch_browser(storage_state=None, linkedin_profile=None):
     proxy_options = _proxy_options()
     if proxy_options:
         launch_options["proxy"] = proxy_options
-    browser = playwright.chromium.launch(**launch_options)
-    context = browser.new_context(
-        **_context_options(storage_state=storage_state, linkedin_profile=linkedin_profile),
-    )
-    context.set_default_timeout(BROWSER_DEFAULT_TIMEOUT_MS)
-    context.set_default_navigation_timeout(BROWSER_DEFAULT_TIMEOUT_MS)
-    Stealth().apply_stealth_sync(context)
-    page = context.new_page()
+
+    # Всё, что после start(), обязано быть под try: цикл событий Playwright
+    # живёт в ЭТОМ потоке, и если уйти отсюда с исключением не позвав stop(),
+    # он останется висеть. Тогда каждый следующий sync_playwright().start()
+    # падает с "Sync API inside the asyncio loop" до конца жизни процесса —
+    # то есть одна разовая ошибка (упавший Chromium, недоступный прокси)
+    # навсегда выключает аккаунт. Именно так умирали Дубай и Казахстан:
+    # десятки тысяч одинаковых ошибок после одного сбоя.
+    browser = context = None
+    try:
+        browser = playwright.chromium.launch(**launch_options)
+        context = browser.new_context(
+            **_context_options(storage_state=storage_state, linkedin_profile=linkedin_profile),
+        )
+        context.set_default_timeout(BROWSER_DEFAULT_TIMEOUT_MS)
+        context.set_default_navigation_timeout(BROWSER_DEFAULT_TIMEOUT_MS)
+        Stealth().apply_stealth_sync(context)
+        page = context.new_page()
+    except BaseException:
+        # Разбираем в обратном порядке и глушим ошибки уборки: если Chromium
+        # уже мёртв, close() тоже бросит, а нам важно добраться до stop().
+        for closer in (
+            getattr(context, "close", None),
+            getattr(browser, "close", None),
+            playwright.stop,
+        ):
+            if closer is None:
+                continue
+            try:
+                closer()
+            except Exception:
+                logger.debug("cleanup after failed launch raised", exc_info=True)
+        raise
+
     return page, context, browser, playwright
 
 

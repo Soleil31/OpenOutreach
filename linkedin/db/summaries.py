@@ -82,7 +82,7 @@ def extract_facts(text: str, *, context: str = "") -> list[str]:
 
     from pydantic_ai import Agent
 
-    from linkedin.llm import get_llm_model
+    from linkedin.llm import get_llm_model, run_agent
 
     system = _FACT_EXTRACTION_PROMPT
     if context:
@@ -104,7 +104,7 @@ def extract_facts(text: str, *, context: str = "") -> list[str]:
             output_type=FactList,
             model_settings={"temperature": 0.0, "timeout": 60},
         )
-        result: FactList = agent.run_sync(text).output
+        result: FactList = run_agent(agent, text).output
     return list(result.facts)
 
 
@@ -233,7 +233,7 @@ def _request_memory_actions(existing: list[str], new_facts: list[str]) -> list[_
     """
     from pydantic_ai import Agent
 
-    from linkedin.llm import get_llm_model
+    from linkedin.llm import get_llm_model, run_agent
 
     old_memory = [{"id": str(idx), "text": fact} for idx, fact in enumerate(existing)]
     prompt = get_update_memory_messages(old_memory, new_facts, None)
@@ -247,7 +247,7 @@ def _request_memory_actions(existing: list[str], new_facts: list[str]) -> list[_
         )
     else:
         agent = Agent(get_llm_model(), model_settings={"temperature": 0.0, "timeout": 60})
-        text = agent.run_sync(prompt).output
+        text = run_agent(agent, prompt).output
     return _ReconcileResponse.model_validate(_parse_memory_response(text)).memory
 
 

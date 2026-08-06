@@ -19,7 +19,7 @@ from linkedin.agents.post_prompt_defaults import (
     DEFAULT_COVER_TEMPLATE,
     DEFAULT_POST_TEMPLATE,
 )
-from linkedin.llm import is_codex_provider
+from linkedin.llm import is_codex_provider, run_agent
 
 logger = logging.getLogger(__name__)
 
@@ -105,4 +105,4 @@ def _ask_llm(system_prompt: str, user_prompt: str) -> str:
         output_type=str,
         model_settings={"temperature": 0.8, "timeout": 60},
     )
-    return agent.run_sync(user_prompt).output.strip()
+    return run_agent(agent, user_prompt).output.strip()
