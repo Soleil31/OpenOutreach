@@ -68,12 +68,41 @@ def find_first_visible(page, selectors: list[str]):
 
 
 def resolve_locator(page, candidates, timeout_per_ms: int = 5000):
-    """Try locator factories in order, return the first one that becomes visible."""
+    """Try locator factories in order, return the first match that is visible.
+
+    Every match is tried, not just ``.first``. LinkedIn's SDUI login page keeps
+    more than one copy of the form in the DOM — a hidden one and the live one,
+    distinguishable only by React ids that change on every render. Taking
+    ``.first`` landed on the hidden copy, so the wait timed out on a field that
+    was plainly on screen, and every fallback in the chain repeated the same
+    mistake. That is what broke the login on 21.08.2026.
+
+    The first probe of each match is short: with several copies in the DOM,
+    spending the full timeout on each hidden one would take minutes. Only when
+    no match anywhere is visible do we go back and wait properly on the first
+    one, so a form that is merely slow to render is still caught.
+    """
+    quick_ms = min(1000, timeout_per_ms)
     for factory in candidates:
-        locator = factory(page).first
+        locator = factory(page)
         try:
-            locator.wait_for(state="visible", timeout=timeout_per_ms)
-            return locator
+            count = locator.count()
+        except Exception:  # a factory may resolve to nothing at all
+            continue
+        if count == 0:
+            continue
+        for index in range(count):
+            candidate = locator.nth(index)
+            try:
+                candidate.wait_for(state="visible", timeout=quick_ms)
+                return candidate
+            except PlaywrightTimeoutError:
+                continue
+        # Nothing visible yet — the page may still be rendering.
+        try:
+            first = locator.first
+            first.wait_for(state="visible", timeout=timeout_per_ms)
+            return first
         except PlaywrightTimeoutError:
             continue
     raise RuntimeError(f"No locator matched on {page.url}")

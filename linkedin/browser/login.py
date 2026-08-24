@@ -184,7 +184,12 @@ def _playwright_login_inner(session: "AccountSession"):
     if email_locator is not None:
         human_type(email_locator, lp.linkedin_username)
         session.wait()
-        password_locator = resolve_locator(page, PASSWORD_LOCATORS)
+        # The password field found before typing is kept. Re-resolving here
+        # unconditionally is what used to fail: typing into the email field
+        # re-renders LinkedIn's SDUI form, and the second lookup could land on
+        # the stale copy left behind. Only look again if the handle really died.
+        if not _still_usable(password_locator):
+            password_locator = None
 
     if password_locator is None:
         password_locator = resolve_locator(page, PASSWORD_LOCATORS)
@@ -209,6 +214,17 @@ def _maybe_resolve_locator(page, candidates, timeout_per_ms: int = 3000):
         return resolve_locator(page, candidates, timeout_per_ms=timeout_per_ms)
     except RuntimeError:
         return None
+
+
+def _still_usable(locator, timeout_ms: int = 1000) -> bool:
+    """Is this locator still attached to a visible element after a re-render?"""
+    if locator is None:
+        return False
+    try:
+        locator.wait_for(state="visible", timeout=timeout_ms)
+        return True
+    except Exception:
+        return False
 
 
 def launch_browser(storage_state=None, linkedin_profile=None):
