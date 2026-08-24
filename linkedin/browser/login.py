@@ -104,7 +104,12 @@ def dismiss_comply_gate(page, timeout_ms: int = COMPLY_PROBE_TIMEOUT_MS) -> bool
 
 
 CHALLENGE_URL_MARKERS = ("/checkpoint/challenge", "/checkpoint/lg/", "/uas/consumer-email-challenge")
-CAPTCHA_MARKERS = ("captcha", "recaptcha", "arkoselabs", "security check", "quick security check")
+CAPTCHA_MARKERS = (
+    "captcha", "recaptcha", "arkoselabs",
+    # LinkedIn называет эту страницу по-разному в заголовке и в тексте
+    "security check", "quick security check", "security verification",
+    "let's do a quick security check", "проверка безопасности",
+)
 BLOCKED_MARKERS = ("http 999", "access denied", "unusual activity", "temporarily restricted")
 CREDENTIAL_MARKERS = (
     "wrong email or password", "couldn't find a linkedin account",
@@ -127,14 +132,29 @@ def classify_login_failure(page, exc: Exception | None = None) -> tuple[str, str
     except Exception:
         pass
     try:
-        body = (page.content() or "").lower()[:200_000]
+        # Именно видимый текст, а не разметка. Поиск слов вроде "security check"
+        # по всему HTML ловится на содержимое <style> и <script>: страница со
+        # вшитыми стилями LinkedIn определялась как капча, хотя это была обычная
+        # форма входа.
+        body = (page.inner_text("body") or "").lower()[:200_000]
+    except Exception:
+        try:
+            body = (page.content() or "").lower()[:200_000]
+        except Exception:
+            pass
+
+    # Заголовок вкладки читаем отдельно: страница проверки безопасности может
+    # почти не иметь видимого текста, но в <title> называет себя честно.
+    title = ""
+    try:
+        title = (page.title() or "").lower()
     except Exception:
         pass
 
     if any(marker in url for marker in CHALLENGE_URL_MARKERS):
         return "checkpoint_2fa", f"LinkedIn увёл на проверку: {url}"
-    if any(marker in body for marker in CAPTCHA_MARKERS):
-        return "captcha", f"на странице капча/security check: {url}"
+    if any(marker in title or marker in body for marker in CAPTCHA_MARKERS):
+        return "captcha", f"страница проверки безопасности: {title.strip() or url}"
     if any(marker in body for marker in CREDENTIAL_MARKERS):
         return "bad_credentials", "LinkedIn отклонил пару логин/пароль"
     if any(marker in body for marker in BLOCKED_MARKERS):

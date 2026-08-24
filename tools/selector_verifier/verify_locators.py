@@ -16,7 +16,12 @@ from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, "/app")
 
-from linkedin.browser.login import EMAIL_LOCATORS, PASSWORD_LOCATORS, SUBMIT_LOCATORS  # noqa: E402
+from linkedin.browser.login import (  # noqa: E402
+    EMAIL_LOCATORS,
+    PASSWORD_LOCATORS,
+    SUBMIT_LOCATORS,
+    classify_login_failure,
+)
 from linkedin.browser.nav import resolve_locator  # noqa: E402
 
 REQUIRED = [
@@ -25,9 +30,26 @@ REQUIRED = [
     ("submit", SUBMIT_LOCATORS),
 ]
 
+# Причины, при которых страница вообще не является формой входа. Патч селекторов
+# такой случай не лечит — его место в маршруте «зовём человека».
+NON_LOGIN_REASONS = {"checkpoint_2fa", "captcha", "proxy_blocked", "bad_credentials"}
+
 
 def check_page(page, path: pathlib.Path):
+    """Проверяет образец сообразно тому, что это за страница.
+
+    Не всякий сохранённый снимок — форма входа. Среди улик попадаются страницы
+    проверки безопасности: полей там нет и никаким патчем они не появятся.
+    Требовать от такого образца поле пароля бессмысленно — вместо этого
+    проверяем, что классификатор правильно назвал причину и не отправил случай
+    на автопочинку.
+    """
     page.goto(path.as_uri(), wait_until="domcontentloaded")
+
+    reason, _detail = classify_login_failure(page)
+    if reason in NON_LOGIN_REASONS:
+        return {"классификация": ("OK — " + reason, "не форма входа, автопочинка неприменима")}
+
     results = {}
     for name, chain in REQUIRED:
         try:
@@ -46,9 +68,11 @@ def check_page(page, path: pathlib.Path):
 
 def main():
     root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "/corpus")
-    pages = sorted(root.rglob("page.html"))
+    # корпус хранит образцы под говорящими именами, сырые пакеты диагностики —
+    # под page.html; принимаем и то и другое
+    pages = sorted(p for p in root.rglob("*.html"))
     if not pages:
-        print(f"В {root} нет ни одного page.html — проверять нечего")
+        print(f"В {root} нет ни одного .html — проверять нечего")
         return 2
 
     print(f"Образцов в корпусе: {len(pages)}\n")
@@ -62,11 +86,11 @@ def main():
         page = context.new_page()
         for path in pages:
             res = check_page(page, path)
-            bad = [k for k, (v, _) in res.items() if v != "OK"]
+            bad = [k for k, (v, _) in res.items() if not v.startswith("OK")]
             mark = "✓" if not bad else "✗"
             if bad:
                 failed += 1
-            print(f"{mark} {path.parent.name}")
+            print(f"{mark} {path.name}")
             for name, (verdict, detail) in res.items():
                 print(f"     {name:<10} {verdict}{('  — ' + detail) if detail else ''}")
         context.close()
