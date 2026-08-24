@@ -21,6 +21,8 @@ from linkedin.conf import (
     ENABLE_ACTIVE_HOURS,
     REST_DAYS,
 )
+from linkedin import account_state
+from linkedin.account_state import LoginBlocked
 from linkedin.diagnostics import failure_diagnostics
 from linkedin.exceptions import AuthenticationError, BrowserUnresponsiveError
 from linkedin.ml.qualifier import BayesianQualifier, KitQualifier
@@ -295,6 +297,86 @@ def seconds_until_active() -> float:
 # ------------------------------------------------------------------
 
 
+class _AuthBreaker:
+    """Stops the daemon grinding through login attempts forever.
+
+    Before this existed, an ``AuthenticationError`` was swallowed, the task was
+    marked failed, and ``reconcile`` immediately created a fresh one — a
+    treadmill that ran ~1300 login attempts in two days against a dead session
+    and hammered LinkedIn hard enough to risk the account.
+
+    Rules: back off between attempts, give up after ``MAX_ATTEMPTS`` in a row,
+    and give up *immediately* on a reason no retry can fix (2FA, captcha, bad
+    credentials). Any completed task resets the counter.
+    """
+
+    BACKOFF_SECONDS = (60, 300, 1800)
+    MAX_ATTEMPTS = 3
+
+    def __init__(self, account: str = ""):
+        self.account = account
+        self.consecutive = 0
+        self.reason = ""
+        self.detail = ""
+
+    @property
+    def tripped(self) -> bool:
+        return self.consecutive >= self.MAX_ATTEMPTS
+
+    def reset(self) -> None:
+        """Clear the counter; only touch the state file if there was a problem."""
+        if not self.consecutive:
+            return
+        logger.info(
+            colored("Auth recovered", "green", attrs=["bold"])
+            + " after %d failed attempt(s)", self.consecutive,
+        )
+        self.consecutive = 0
+        self.reason = self.detail = ""
+        account_state.clear_ok(self.account)
+
+    def record_failure(self, reason: str, detail: str) -> int:
+        self.consecutive += 1
+        self.reason, self.detail = reason, detail
+        account_state.write(
+            account_state.PARKED if self.tripped else account_state.DEGRADED,
+            account=self.account,
+            reason=reason,
+            detail=detail,
+            attempts=self.consecutive,
+        )
+        return self.consecutive
+
+    def backoff_seconds(self) -> int:
+        index = min(max(self.consecutive - 1, 0), len(self.BACKOFF_SECONDS) - 1)
+        return self.BACKOFF_SECONDS[index]
+
+    def park(self, reason: str, detail: str) -> None:
+        self.reason, self.detail = reason, detail
+        account_state.write(
+            account_state.PARKED,
+            account=self.account,
+            reason=reason,
+            detail=detail,
+            attempts=self.consecutive,
+        )
+        logger.error(
+            colored("Daemon parked — no further login attempts", "red", attrs=["bold"])
+            + "\nAccount: %s\nReason: %s — %s\n"
+            "The session must be restored by hand (Admin → LinkedIn profile → cookie_import_json).",
+            self.account, reason, account_state.describe(reason),
+        )
+
+
+def _park_and_idle(breaker: "_AuthBreaker", heartbeat: "Heartbeat") -> None:
+    """Stay alive but touch nothing: heartbeat only, never LinkedIn."""
+    while True:
+        sleep_with_heartbeat(
+            600, heartbeat,
+            f"PARKED ({breaker.reason}) — waiting for a human to restore the session",
+        )
+
+
 def run_daemon(session):
     from linkedin.ml.hub import fetch_kit
     from linkedin.setup.freemium import import_freemium_campaign
@@ -331,6 +413,8 @@ def run_daemon(session):
     cloud_promo = _CloudPromoRotator(interval=86400)
     heartbeat = Heartbeat()
     rhythm = _HumanRhythmBreak(heartbeat)
+    breaker = _AuthBreaker(getattr(session.linkedin_profile, "linkedin_username", ""))
+    account_state.clear_ok(breaker.account)
 
     # Single-threaded: one task at a time, no concurrent enqueuing,
     # so sleeping until the next scheduled_at is safe.
@@ -386,15 +470,37 @@ def run_daemon(session):
         try:
             with failure_diagnostics(session):
                 run_task_with_watchdog(handler, task, session, qualifiers)
-        except AuthenticationError:
+        except AuthenticationError as auth_error:
             logger.warning("Session expired during %s — re-authenticating", task)
+            reason, detail = "session_expired", str(auth_error)[:500]
+            needs_human = False
             try:
                 session.reauthenticate()
-            except Exception:
+            except LoginBlocked as blocked:
+                reason, detail, needs_human = blocked.reason, blocked.detail, blocked.needs_human
+                logger.error("Re-authentication blocked for %s — %s", task, blocked)
+            except Exception as unexpected:
+                detail = f"{type(unexpected).__name__}: {unexpected}"[:500]
                 logger.exception("Re-authentication failed for %s", task)
-            # Either way, mark this task FAILED; reconcile will re-create a
-            # fresh task for the deal on the next idle cycle.
+            else:
+                breaker.reset()
+                task.mark_failed()
+                continue
+
+            attempts = breaker.record_failure(reason, detail)
             task.mark_failed()
+
+            if needs_human or breaker.tripped:
+                breaker.park(reason, detail)
+                _park_and_idle(breaker, heartbeat)
+                return
+
+            wait = breaker.backoff_seconds()
+            logger.warning(
+                "Login attempt %d/%d failed (%s) — backing off %ds before trying again",
+                attempts, breaker.MAX_ATTEMPTS, reason, wait,
+            )
+            sleep_with_heartbeat(wait, heartbeat, f"auth backoff after {reason}")
             continue
         except ModelHTTPError as e:
             task.mark_failed()
@@ -409,5 +515,6 @@ def run_daemon(session):
             continue
 
         task.mark_completed()
+        breaker.reset()
         cloud_promo.maybe_log()
         rhythm.maybe_break()

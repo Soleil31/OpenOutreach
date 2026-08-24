@@ -68,14 +68,18 @@ class AccountSession:
         self.page.wait_for_load_state("domcontentloaded")
 
     def reauthenticate(self):
-        """Force a fresh login: close browser, clear saved cookies, re-launch."""
+        """Force a fresh login: close the browser and log in on a clean context.
+
+        The saved cookies are deliberately NOT cleared here. They are replaced
+        only once a login actually succeeds — otherwise every failed attempt
+        destroyed the stored session, and a session imported by hand could not
+        survive a single failing cycle.
+        """
         from linkedin.browser.login import start_browser_session
 
-        logger.warning("Re-authenticating %s — clearing saved session", self)
+        logger.warning("Re-authenticating %s — saved session kept until the new one works", self)
         self.close()
-        self.linkedin_profile.cookie_data = None
-        self.linkedin_profile.save(update_fields=["cookie_data"])
-        start_browser_session(session=self)
+        start_browser_session(session=self, force_login=True)
 
     def _maybe_refresh_cookies(self):
         """Re-login if the li_at auth cookie in the saved DB state is expired."""

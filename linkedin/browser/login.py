@@ -8,6 +8,7 @@ from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth
 from termcolor import colored
 
+from linkedin.account_state import LoginBlocked
 from linkedin.browser.nav import goto_page, human_type, resolve_locator
 from linkedin.conf import (
     BROWSER_DEFAULT_TIMEOUT_MS,
@@ -102,7 +103,70 @@ def dismiss_comply_gate(page, timeout_ms: int = COMPLY_PROBE_TIMEOUT_MS) -> bool
     return False
 
 
+CHALLENGE_URL_MARKERS = ("/checkpoint/challenge", "/checkpoint/lg/", "/uas/consumer-email-challenge")
+CAPTCHA_MARKERS = ("captcha", "recaptcha", "arkoselabs", "security check", "quick security check")
+BLOCKED_MARKERS = ("http 999", "access denied", "unusual activity", "temporarily restricted")
+CREDENTIAL_MARKERS = (
+    "wrong email or password", "couldn't find a linkedin account",
+    "неверный пароль", "please enter a valid email",
+)
+
+
+def classify_login_failure(page, exc: Exception | None = None) -> tuple[str, str]:
+    """Назвать причину, по которой не удалось войти. Возвращает ``(reason, detail)``.
+
+    Демон по причине решает, есть ли смысл в следующей попытке: сломанный
+    локатор чинится деплоем, а челлендж — только человеком. Всё делается
+    best-effort: если страницу не прочитать, отдаём ``unknown``, но сам
+    классификатор не должен бросать исключение.
+    """
+    url = ""
+    body = ""
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        pass
+    try:
+        body = (page.content() or "").lower()[:200_000]
+    except Exception:
+        pass
+
+    if any(marker in url for marker in CHALLENGE_URL_MARKERS):
+        return "checkpoint_2fa", f"LinkedIn увёл на проверку: {url}"
+    if any(marker in body for marker in CAPTCHA_MARKERS):
+        return "captcha", f"на странице капча/security check: {url}"
+    if any(marker in body for marker in CREDENTIAL_MARKERS):
+        return "bad_credentials", "LinkedIn отклонил пару логин/пароль"
+    if any(marker in body for marker in BLOCKED_MARKERS):
+        return "proxy_blocked", f"LinkedIn закрыл доступ с этого IP: {url}"
+    if "/login" in url and "No locator matched" in str(exc or ""):
+        return "locator_break", (
+            "форма входа отрисована, но поля не находятся — LinkedIn сменил вёрстку. "
+            f"{exc}"
+        )
+    if str(exc or ""):
+        return "unknown", str(exc)[:500]
+    return "unknown", f"вход не завершился, текущий URL: {url}"
+
+
 def playwright_login(session: "AccountSession"):
+    """Войти или бросить ``LoginBlocked`` с названной причиной отказа."""
+    try:
+        return _playwright_login_inner(session)
+    except LoginBlocked:
+        raise
+    except Exception as exc:
+        reason, detail = classify_login_failure(session.page, exc)
+        url = ""
+        try:
+            url = session.page.url
+        except Exception:
+            pass
+        logger.warning("Login blocked for %s — %s: %s", session, reason, detail)
+        raise LoginBlocked(reason, detail, url) from exc
+
+
+def _playwright_login_inner(session: "AccountSession"):
     page = session.page
     lp = session.linkedin_profile
     logger.info(colored("Fresh login sequence starting", "cyan") + f" for {session}")
@@ -298,15 +362,24 @@ def _save_cookies(session):
     session.linkedin_profile.save(update_fields=["cookie_data"])
 
 
-def start_browser_session(session: "AccountSession"):
+def start_browser_session(session: "AccountSession", force_login: bool = False):
+    """Открыть браузер для аккаунта.
+
+    ``cookie_data`` теперь только *перезаписывается успешным логином* и никогда
+    не стирается заранее. Стирание до попытки (как было раньше) означало, что
+    неудачный вход оставлял аккаунт вообще без сессии — и сессия, заведённая
+    руками, не переживала ни одного неудачного цикла.
+    """
     logger.debug("Configuring browser for %s", session)
 
     session.linkedin_profile.refresh_from_db(fields=PROFILE_BROWSER_FIELDS)
     cookie_data = session.linkedin_profile.cookie_data
 
-    storage_state = cookie_data if cookie_data else None
+    storage_state = None if force_login else (cookie_data if cookie_data else None)
     if storage_state:
         logger.info("Loading saved session for %s", session)
+    elif force_login and cookie_data:
+        logger.info("Forced re-login for %s — saved session kept until the new one works", session)
 
     session.page, session.context, session.browser, session.playwright = launch_browser(
         storage_state=storage_state,
@@ -330,8 +403,15 @@ def start_browser_session(session: "AccountSession"):
             )
         except RuntimeError as exc:
             logger.warning("Saved LinkedIn session invalid for %s: %s", session, exc)
-            session.linkedin_profile.cookie_data = None
-            session.linkedin_profile.save(update_fields=["cookie_data"])
+            # Перезапускаем браузер на чистом контексте вместо стирания
+            # сохранённого состояния: если логин ниже упадёт, старые куки
+            # останутся в базе и заведённая руками сессия не будет уничтожена
+            # неудачной повторной попыткой.
+            session.close()
+            session.page, session.context, session.browser, session.playwright = launch_browser(
+                storage_state=None,
+                linkedin_profile=session.linkedin_profile,
+            )
             playwright_login(session)
             _save_cookies(session)
             logger.info(colored("Login successful – session saved", "green", attrs=["bold"]))
