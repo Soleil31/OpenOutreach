@@ -91,6 +91,33 @@ def make_self_contained(html: str, fetch=_fetch_css) -> tuple[str, int]:
     return html, inlined
 
 
+def stamp_origin(html: str, url: str) -> str:
+    """Вписывает исходный адрес страницы в сам образец.
+
+    Из файла на диске адрес не восстановить, а без него поверхность приходится
+    угадывать по разметке. Тег в <head> переживает и копирование, и перенос.
+    """
+    if not url:
+        return html
+    from tools.autoheal.surfaces import ORIGIN_META
+    if ORIGIN_META in html:
+        return html
+    tag = f'<meta name="{ORIGIN_META}" content="{url}">'
+    if "<head>" in html:
+        return html.replace("<head>", "<head>" + tag, 1)
+    return tag + html
+
+
+def origin_from_package(package: pathlib.Path) -> str:
+    """Достаёт адрес страницы из трассировки лежащего рядом error.txt."""
+    error = package / "error.txt"
+    if not error.exists():
+        return ""
+    text = error.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"on (https?://\S+)", text)
+    return match.group(1).rstrip(".,)") if match else ""
+
+
 def scrub(html: str) -> str:
     for pattern, repl in SCRUB_PATTERNS:
         html = pattern.sub(repl, html)
@@ -141,6 +168,7 @@ def main() -> int:
         if inlined == 0 and external_css_urls(raw):
             print("  ! стили не забрались — образец не самодостаточен, пропускаю", file=sys.stderr)
             continue
+        html = stamp_origin(html, origin_from_package(page.parent))
         html = scrub(html)
         if SENSITIVE.search(html):
             print("  ! в образце остались чувствительные данные, пропускаю", file=sys.stderr)
@@ -152,6 +180,7 @@ def main() -> int:
             "file": name,
             "source": page.parent.name,
             "inlined_stylesheets": inlined,
+            "origin_url": origin_from_package(page.parent),
             "bytes": len(html),
         }
         known.add(mark)

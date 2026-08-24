@@ -90,51 +90,13 @@ def _spawn_desktop_context(session) -> tuple[BrowserContext, Page]:
 # selector keyed on visible text must cover EN + RU at minimum. We also keep
 # language-agnostic structural selectors (class/aria-label/data-view-name) as
 # the primary lookup — they survive translation.
-_START_POST_SELECTORS = [
-    ".share-box-feed-entry__trigger",
-    "[data-view-name='share-creation-state']",
-    "button[aria-label*='post' i]",
-    "button[aria-label*='публикац' i]",
-    "button[aria-label*='bericht' i]",
-    "button:has-text('Start a post')",
-    "button:has-text('Create a post')",
-    "button:has-text('Начать публикацию')",
-    "button:has-text('Создать публикацию')",
-    "button:has-text('Begin een bericht')",
-    "button:has-text('Bericht maken')",
-]
-
-_POST_EDITOR_SELECTORS = [
-    ".ql-editor",
-    "[contenteditable='true']",
-    "[data-placeholder='What do you want to talk about?']",
-    "[data-placeholder*='talk about' i]",
-    "[data-placeholder*='хотите рассказать' i]",
-    "[data-placeholder*='хотите поделиться' i]",
-    "[data-placeholder*='waar wil je' i]",
-    "[data-placeholder*='waar je het over' i]",
-]
-
-_SUBMIT_SELECTORS = [
-    "button.share-actions__primary-action",
-    "button:has-text('Post')",
-    "button:has-text('Опубликовать')",
-    "button:has-text('Plaatsen')",
-    "button:has-text('Publiceren')",
-    "button[aria-label='Post']",
-    "button[aria-label='Опубликовать']",
-    "button[aria-label='Plaatsen']",
-]
-
-
-_GDPR_ACCEPT_SELECTORS = [
-    "button[action-type='ACCEPT']",
-    "button[data-tracking-control-name*='cookie.consent.accept' i]",
-    "button:has-text('Accept')",
-    "button:has-text('Accepteren')",
-    "button:has-text('Принять')",
-    "button:has-text('Akkoord')",
-]
+# Правила поиска — в слое селекторов, единственном файле, куда пишет автопочинка.
+from linkedin.browser.selectors import (
+    GDPR_ACCEPT_SELECTORS as _GDPR_ACCEPT_SELECTORS,
+    POST_EDITOR_SELECTORS as _POST_EDITOR_SELECTORS,
+    POST_SUBMIT_SELECTORS as _SUBMIT_SELECTORS,
+    START_POST_SELECTORS as _START_POST_SELECTORS,
+)
 
 
 def _dismiss_gdpr_if_present(page: Page) -> None:
@@ -265,31 +227,10 @@ def publish_text_post(session, text: str) -> None:
 # ── Image post ──────────────────────────────────────────────────────────
 
 
-_ADD_MEDIA_SELECTORS = [
-    "button[aria-label*='media' i]",
-    "button[aria-label*='photo' i]",
-    "button[aria-label*='медиа' i]",
-    "button[aria-label*='фото' i]",
-    "button[aria-label*='foto' i]",
-    "button[data-test-icon='image-medium']",
-    ".share-promoted-detour-button button",
-    "button:has-text('Add media')",
-    "button:has-text('Добавить медиа')",
-    "button:has-text('Media toevoegen')",
-    "button:has-text('Foto toevoegen')",
-]
-
-_DONE_AFTER_UPLOAD_SELECTORS = [
-    "button.share-box-footer__primary-btn",
-    ".image-detour-actions button.share-box-footer__primary-btn",
-    "button:has-text('Done')",
-    "button:has-text('Next')",
-    "button:has-text('Готово')",
-    "button:has-text('Далее')",
-    "button:has-text('Gereed')",
-    "button:has-text('Klaar')",
-    "button:has-text('Volgende')",
-]
+from linkedin.browser.selectors import (
+    ADD_MEDIA_SELECTORS as _ADD_MEDIA_SELECTORS,
+    DONE_AFTER_UPLOAD_SELECTORS as _DONE_AFTER_UPLOAD_SELECTORS,
+)
 
 
 def publish_image_post(session, text: str, image_path) -> None:

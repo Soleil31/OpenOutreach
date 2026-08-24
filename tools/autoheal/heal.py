@@ -31,7 +31,7 @@ PATCH_SCHEMA = {
         "changed_chains": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Имена изменённых наборов: email, password, submit, comply",
+            "description": "Имена изменённых наборов, например compose_send или top_card",
         },
         "reasoning": {
             "type": "string",
@@ -57,8 +57,11 @@ LinkedIn сменил вёрстку, и правила поиска элеме�
 4. Не удаляй существующие правила без нужды: они держат работу со старыми
    вёрстками, которые тоже проверяются.
 5. Правила — функции от страницы (lambda p: ...), а не строки.
-6. Учитывай, что в разметке может быть НЕСКОЛЬКО копий одной формы, из которых
-   видна только одна. Правило, попадающее в скрытую копию, считается негодным.
+6. Учитывай, что в разметке может быть НЕСКОЛЬКО копий одного блока, из которых
+   виден только один. Правило, попадающее в скрытую копию, считается негодным.
+7. Файл покрывает весь конвейер: вход, карточку профиля, установление контакта,
+   переписку, поиск и публикацию. Меняй ТОЛЬКО те наборы, которые относятся к
+   сломавшейся поверхности; остальные оставь дословно как есть.
 
 Ответ — один JSON по заданной схеме, без пояснений вокруг."""
 
@@ -80,9 +83,25 @@ def _trim_html(html: str, limit: int = 120_000) -> str:
 
 
 def build_prompt(incident, selectors_source: str) -> str:
+    from tools.autoheal import surfaces
+
     page = incident.path / "page.html"
     error = incident.path / "error.txt"
+
+    key = incident.data.get("surface", "")
+    surface = surfaces.BY_KEY.get(key)
+    if surface is not None:
+        where = (
+            f"# Что сломалось\n"
+            f"Поверхность: {surface.title} ({surface.key}).\n"
+            f"Обязаны находиться наборы: {', '.join(surface.required_chains)}.\n"
+            f"Пока это не работает: {surface.breaks}"
+        )
+    else:
+        where = "# Что сломалось\nПоверхность определить не удалось — чини по трассировке."
+
     parts = [
+        where,
         f"# Причина отказа\n{incident.reason}: {incident.data.get('detail', '')}",
         f"# Текущий файл linkedin/browser/selectors.py\n```python\n{selectors_source}\n```",
     ]
@@ -156,9 +175,18 @@ def sanity_check(patch: dict) -> tuple[bool, str]:
     except SyntaxError as exc:
         return False, f"не компилируется: {exc}"
 
-    required = ["EMAIL_LOCATORS", "PASSWORD_LOCATORS", "SUBMIT_LOCATORS",
-                "COMPLY_LOCATORS", "CAPTCHA_MARKERS", "CHALLENGE_URL_MARKERS",
-                "BLOCKED_MARKERS", "CREDENTIAL_MARKERS", "COMPLY_PROBE_TIMEOUT_MS"]
+    # Все имена, которые импортирует остальной код. Пропажа любого — мгновенный
+    # отказ: файл покрывает весь конвейер, и потеря набора ломает не вход, а,
+    # скажем, отправку сообщений, что заметно далеко не сразу.
+    required = [
+        "EMAIL_LOCATORS", "PASSWORD_LOCATORS", "SUBMIT_LOCATORS", "COMPLY_LOCATORS",
+        "COMPLY_PROBE_TIMEOUT_MS", "CHALLENGE_URL_MARKERS", "CAPTCHA_MARKERS",
+        "BLOCKED_MARKERS", "CREDENTIAL_MARKERS", "TOP_CARD_SELECTORS",
+        "CONNECT_SELECTORS", "STATUS_SELECTORS", "MESSAGE_SELECTOR_CHAINS",
+        "SEARCH_SELECTORS", "START_POST_SELECTORS", "POST_EDITOR_SELECTORS",
+        "POST_SUBMIT_SELECTORS", "GDPR_ACCEPT_SELECTORS", "ADD_MEDIA_SELECTORS",
+        "DONE_AFTER_UPLOAD_SELECTORS", "NAMED_CHAINS",
+    ]
     missing = [name for name in required if f"{name} " not in source and f"{name}=" not in source]
     if missing:
         return False, f"пропали экспортируемые имена: {', '.join(missing)}"

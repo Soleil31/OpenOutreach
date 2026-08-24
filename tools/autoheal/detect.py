@@ -47,6 +47,20 @@ def fingerprint_of(package: pathlib.Path) -> str:
     return fingerprint(page.read_text(encoding="utf-8", errors="replace"))
 
 
+def surface_of(package: pathlib.Path) -> str:
+    """К какой поверхности конвейера относится поломка."""
+    from tools.autoheal import surfaces
+    page = package / "page.html"
+    html = page.read_text(encoding="utf-8", errors="replace") if page.exists() else ""
+    url = ""
+    error = package / "error.txt"
+    if error.exists():
+        import re as _re
+        match = _re.search(r"on (https?://\S+)", error.read_text(encoding="utf-8", errors="replace"))
+        url = match.group(1) if match else ""
+    return surfaces.classify_sample(url, html) or ""
+
+
 def reason_from_evidence(package: pathlib.Path) -> tuple[str, str]:
     """Причина по тексту ошибки, если файл состояния молчит."""
     error_file = package / "error.txt"
@@ -83,6 +97,14 @@ def detect(server: str) -> incidents.Incident | None:
 
     fingerprint = fingerprint_of(package) if package else ""
     incident = incidents.open_incident(server, account, reason, detail, fingerprint)
+
+    if package is not None and not incident.data.get("surface"):
+        from tools.autoheal import surfaces
+        key = surface_of(package)
+        incident.data["surface"] = key
+        if key:
+            incident.data["breaks"] = surfaces.BY_KEY[key].breaks
+        incident.save()
 
     if package is not None and not (incident.path / "page.html").exists():
         for name in ("page.html", "error.txt"):

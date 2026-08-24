@@ -39,6 +39,8 @@ def run_verifier(repo: pathlib.Path, candidate: pathlib.Path | None = None,
             "docker", "run", "--rm",
             "-v", f"{corpus_dir}:/corpus:ro",
             "-v", f"{verifier}:/tmp/v.py:ro",
+            # слой поверхностей нужен верификатору внутри контейнера
+            "-v", f"{repo / 'tools'}:/app/tools:ro",
             "-v", f"{selectors}:/app/linkedin/browser/selectors.py:ro",
             "-v", f"{repo / 'linkedin/browser/nav.py'}:/app/linkedin/browser/nav.py:ro",
             "-v", f"{repo / 'linkedin/browser/login.py'}:/app/linkedin/browser/login.py:ro",

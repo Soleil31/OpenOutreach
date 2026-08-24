@@ -9,11 +9,7 @@ from linkedin.db.leads import discover_and_enrich
 
 logger = logging.getLogger(__name__)
 
-SELECTORS = {
-    "search_bar": "//input[contains(@placeholder, 'Search')]",
-    "profile_links": 'a[href*="/in/"]',
-}
-
+from linkedin.browser.selectors import SEARCH_SELECTORS as SELECTORS
 
 def _go_to_profile(session: "AccountSession", url: str, public_identifier: str):
     if f"/in/{public_identifier}" in session.page.url:

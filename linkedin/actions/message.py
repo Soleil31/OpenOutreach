@@ -9,38 +9,7 @@ logger = logging.getLogger(__name__)
 
 LINKEDIN_MESSAGING_URL = "https://www.linkedin.com/messaging/thread/new/"
 
-# Selector fallback chains: semantic/ARIA first, then class-based.
-# LinkedIn A/B tests UI variants per account and renames classes often.
-# Each key maps to a list tried in order; first with a match wins.
-SELECTOR_CHAINS = {
-    # ── New thread: recipient search ──
-    "connections_input": [
-        'input[role="combobox"][placeholder*="name"]',
-        'input[class*="msg-connections"]',
-        'input[placeholder*="Type a name"]',
-        'input[type="text"][aria-owns]',
-    ],
-    "search_result_row": [
-        'ul[role="listbox"] li[role="option"]',
-        'div[class*="msg-connections-typeahead__search-result-row"]',
-        'li[class*="search-result"]',
-    ],
-    # ── Thread: compose area ──
-    "compose_input": [
-        'div[role="textbox"][aria-label*="Write a message"]',
-        'div[role="textbox"][aria-label*="message"i]',
-        'div[class*="msg-form__contenteditable"]',
-        'div[contenteditable="true"]',
-    ],
-    "compose_send": [
-        'button[type="submit"][class*="msg-form"]',
-        'button[class*="send-btn"]',
-        'button[class*="send-button"]',
-        'form button[type="submit"]',
-        'button[type="submit"]',
-    ],
-}
-
+from linkedin.browser.selectors import MESSAGE_SELECTOR_CHAINS as SELECTOR_CHAINS
 
 def _find(page, key: str, timeout: int = 5000) -> Locator:
     """Try each selector in the chain for *key*, return the first with matches.

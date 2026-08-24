@@ -108,14 +108,7 @@ def resolve_locator(page, candidates, timeout_per_ms: int = 5000):
     raise RuntimeError(f"No locator matched on {page.url}")
 
 
-TOP_CARD_SELECTORS = [
-    'section:has(div.top-card-background-hero-image)',
-    'section[data-member-id]',
-    'section.artdeco-card:has(> div.pv-top-card)',
-    'section:has(> div[class*="pv-top-card"])',
-    'section[componentkey*="com.linkedin.sdui.profile.card"]',
-]
-
+from linkedin.browser.selectors import TOP_CARD_SELECTORS
 
 def find_top_card(session):
     top_card = find_first_visible(session.page, TOP_CARD_SELECTORS)

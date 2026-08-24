@@ -8,31 +8,9 @@ from linkedin.browser.nav import find_top_card, dump_page_html
 
 logger = logging.getLogger(__name__)
 
-SELECTORS = {
-    "weekly_limit": 'div[class*="ip-fuse-limit-alert__warning"]',
-    "invite_to_connect": (
-        '[aria-label*="Invite"][aria-label*="to connect"]:visible, '
-        'a:has(span:text-is("Connect")):visible, '
-        'button:has(span:text-is("Connect")):visible'
-    ),
-    "error_toast": 'div[data-test-artdeco-toast-item-type="error"]',
-    "more_button": (
-        'button[aria-label="More"]:visible, '
-        'button[id*="overflow"]:visible, '
-        'button[aria-label*="More actions"]:visible, '
-        'button:has(span:text-is("More")):visible'
-    ),
-    "connect_option": (
-        'div[role="button"][aria-label^="Invite"][aria-label*=" to connect"], '
-        'div[role="button"]:text-is("Connect"), '
-        '[role="menuitem"][aria-label*="Connect"], '
-        '[role="menuitem"]:has-text("Connect"), '
-        'li:text-is("Connect"), '
-        'span[role="button"]:text-is("Connect")'
-    ),
-    "send_now": 'button:has-text("Send now"), button[aria-label*="Send without"], button[aria-label*="Send invitation"]',
-}
-
+# Правила поиска живут в слое селекторов — единственном файле, куда пишет
+# автопочинка. Здесь они только используются.
+from linkedin.browser.selectors import CONNECT_SELECTORS as SELECTORS
 
 def send_connection_request(
         session: "AccountSession",
