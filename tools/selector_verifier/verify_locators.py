@@ -16,11 +16,11 @@ from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, "/app")
 
-from linkedin.browser.login import (  # noqa: E402
+from linkedin.browser.login import classify_login_failure  # noqa: E402
+from linkedin.browser.selectors import (  # noqa: E402
     EMAIL_LOCATORS,
     PASSWORD_LOCATORS,
     SUBMIT_LOCATORS,
-    classify_login_failure,
 )
 from linkedin.browser.nav import resolve_locator  # noqa: E402
 
