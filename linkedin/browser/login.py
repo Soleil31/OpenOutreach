@@ -1,4 +1,5 @@
 # linkedin/browser/login.py
+import asyncio
 import logging
 import os
 from urllib.parse import urlparse
@@ -190,8 +191,26 @@ def _still_usable(locator, timeout_ms: int = 1000) -> bool:
         return False
 
 
+def _detach_running_loop():
+    """Снять пометку «в этом потоке крутится цикл asyncio».
+
+    linkedin/llm.py на импорте зовёт nest_asyncio.apply(), а pydantic-ai
+    гоняет запросы к модели через run_sync. После такого вызова в потоке
+    остаётся помеченный активным цикл, и синхронный Playwright наотрез
+    отказывается стартовать: "Sync API inside the asyncio loop".
+
+    Метку снимаем и НЕ возвращаем: если её вернуть, Playwright падает уже
+    на первом действии страницы (Page.goto). Запросы к модели от этого не
+    страдают — nest_asyncio ставит метку заново на время каждого вызова.
+    """
+    if asyncio._get_running_loop() is not None:
+        logger.debug("Detaching stale asyncio loop before launching Playwright")
+        asyncio._set_running_loop(None)
+
+
 def launch_browser(storage_state=None, linkedin_profile=None):
     logger.debug("Launching Playwright")
+    _detach_running_loop()
     playwright = sync_playwright().start()
     launch_options = {
         "headless": False,
