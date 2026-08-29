@@ -12,6 +12,7 @@ _STATE_LOG_STYLE = {
     ProfileState.READY_TO_CONNECT: ("READY_TO_CONNECT", "yellow", ["bold"]),
     ProfileState.PENDING: ("PENDING", "cyan", []),
     ProfileState.CONNECTED: ("CONNECTED", "green", ["bold"]),
+    ProfileState.HANDOFF: ("HANDOFF", "magenta", ["bold"]),
     ProfileState.COMPLETED: ("COMPLETED", "green", ["bold"]),
     ProfileState.FAILED: ("FAILED", "red", ["bold"]),
 }
@@ -83,7 +84,6 @@ def set_profile_state(session, public_identifier: str, new_state: str, reason: s
     do not enqueue directly.
     """
     from crm.models import Deal
-    from linkedin.tasks.scheduler import on_deal_state_entered
 
     deal = (
         Deal.objects.filter(lead__public_identifier=public_identifier, campaign=session.campaign)
@@ -93,6 +93,19 @@ def set_profile_state(session, public_identifier: str, new_state: str, reason: s
     if not deal:
         raise ValueError(f"No Deal for {public_identifier} — cannot set state {new_state}")
 
+    transition_deal(deal, new_state, reason=reason, outcome=outcome)
+
+
+def transition_deal(deal, new_state: str, *, reason: str = "", outcome: str = ""):
+    """Move an already-loaded Deal and fire the scheduler hook.
+
+    Split out of ``set_profile_state`` so the Django admin can put a lead
+    back in the bot's hands — a request has no ``AccountSession`` to scope
+    the lookup with.
+    """
+    from linkedin.tasks.scheduler import on_deal_state_entered
+
+    public_identifier = deal.lead.public_identifier
     ps = ProfileState(new_state)
     state_changed = (deal.state != ps)
 

@@ -156,8 +156,11 @@ def on_deal_state_entered(deal) -> None:
         enqueue_check_pending(campaign_id, public_id, backoff_hours=backoff)
     elif state == ProfileState.CONNECTED:
         enqueue_follow_up(campaign_id, public_id)
-    # Other states (QUALIFIED, READY_TO_CONNECT, COMPLETED, FAILED) have
-    # no implied deal-level task — handled by the connect loop or terminal.
+    # Other states (QUALIFIED, READY_TO_CONNECT, HANDOFF, COMPLETED, FAILED)
+    # have no implied deal-level task — handled by the connect loop, or
+    # terminal. HANDOFF is terminal until a human moves the deal back to
+    # CONNECTED from the admin; enqueueing here would put the bot back on
+    # top of the conversation a salesperson has taken over.
 
 
 # ── Reconciliation ────────────────────────────────────────────────────

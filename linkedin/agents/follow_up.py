@@ -24,12 +24,16 @@ logger = logging.getLogger(__name__)
 class FollowUpDecision(BaseModel):
     """Structured output from the follow-up agent."""
 
-    action: Literal["send_message", "mark_completed", "wait"] = Field(
+    # A member on the existing Literal, never a new field: the codex gateway
+    # runs strict structured output (``_strictify_schema`` marks every
+    # property required), so a new property would force the model to rule on
+    # it every single call and a miss fails the task with no retry.
+    action: Literal["send_message", "mark_completed", "wait", "handoff"] = Field(
         description="What to do next for this lead.",
     )
     message: str | None = Field(
         default=None,
-        description="The message to send. Required when action='send_message'.",
+        description="The message to send. Required for action='send_message' and 'handoff'.",
     )
     outcome: Literal[
         "converted", "not_interested", "wrong_fit", "no_budget",
@@ -44,8 +48,8 @@ class FollowUpDecision(BaseModel):
 
     @model_validator(mode="after")
     def _check_required_fields(self):
-        if self.action == "send_message" and not self.message:
-            raise ValueError("message is required when action='send_message'")
+        if self.action in ("send_message", "handoff") and not self.message:
+            raise ValueError("message is required when action='send_message' or 'handoff'")
         if self.action == "mark_completed" and not self.outcome:
             raise ValueError("outcome is required when action='mark_completed'")
         return self
@@ -359,7 +363,7 @@ def run_follow_up_agent(session, deal) -> FollowUpDecision:
         if decision is None:
             raise RuntimeError(f"LLM returned unparseable response for follow-up of {public_id}")
 
-    if decision.action == "send_message" and decision.message:
+    if decision.action in ("send_message", "handoff") and decision.message:
         trimmed = _strip_ack_opener(decision.message)
         if trimmed != decision.message:
             logger.info("follow_up for %s: stripped acknowledgment opener", public_id)
