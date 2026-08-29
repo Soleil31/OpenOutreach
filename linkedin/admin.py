@@ -238,11 +238,23 @@ class TaskAdmin(admin.ModelAdmin):
 
 @admin.register(ChatMessage)
 class ChatMessageAdmin(admin.ModelAdmin):
-    list_display = ("content_type", "object_id", "owner", "creation_date")
-    list_filter = ("content_type", "owner")
+    # Without the body and the direction this list was unusable for triage.
+    list_display = ("creation_date", "direction", "object_id", "excerpt", "owner")
+    list_filter = ("is_outgoing", "content_type", "owner")
+    search_fields = ("content",)
     raw_id_fields = ("owner", "answer_to", "topic")
     date_hierarchy = "creation_date"
+    ordering = ("-creation_date",)
     readonly_fields = ("content_type", "object_id", "content", "owner", "creation_date")
+
+    @admin.display(description="")
+    def direction(self, obj):
+        return "→" if obj.is_outgoing else "←"
+
+    @admin.display(description="Сообщение")
+    def excerpt(self, obj):
+        text = (obj.content or "").strip()
+        return (text[:100] + "…") if len(text) > 100 else (text or "—")
 
 
 @admin.register(Post)
