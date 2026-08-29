@@ -1,3 +1,14 @@
+# Manual release build — there is no CI in this repo (see docs/docker.md).
+#
+#   gcloud builds submit --project gen-lang-client-0289784019 \
+#       --config cloudbuild.yaml --substitutions=_TAG=$(git rev-parse --short HEAD) .
+#
+# Two tags on purpose. `cexim-figma` is what the servers' docker-compose.yml
+# pulls and is mutable; `_TAG` pins the same image to a commit so there is
+# something to roll back to. $SHORT_SHA is not available here — a local
+# `builds submit` has no repo source context — hence the explicit substitution.
+substitutions:
+  _TAG: manual
 steps:
   - name: gcr.io/cloud-builders/docker
     args:
@@ -6,9 +17,12 @@ steps:
       - compose/linkedin/Dockerfile
       - -t
       - europe-west3-docker.pkg.dev/gen-lang-client-0289784019/openoutreach/openoutreach:cexim-figma
+      - -t
+      - europe-west3-docker.pkg.dev/gen-lang-client-0289784019/openoutreach/openoutreach:${_TAG}
       - .
 images:
   - europe-west3-docker.pkg.dev/gen-lang-client-0289784019/openoutreach/openoutreach:cexim-figma
+  - europe-west3-docker.pkg.dev/gen-lang-client-0289784019/openoutreach/openoutreach:${_TAG}
 options:
   machineType: E2_HIGHCPU_8
 timeout: 1800s
