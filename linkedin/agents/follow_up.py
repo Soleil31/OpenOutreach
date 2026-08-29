@@ -7,6 +7,7 @@ The handler in tasks/follow_up.py executes the decision.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -55,6 +56,40 @@ class FollowUpDecision(BaseModel):
 # preserves literal phrasing for the turns that matter most when composing
 # the next reply.
 RECENT_MESSAGES_WINDOW = 6
+
+# A reply shorter than this is politeness, not an answer — "ок", "спасибо",
+# "Добрый день" must not spend the one discovery turn we allow ourselves.
+MIN_SUBSTANTIVE_REPLY_WORDS = 4
+
+# How many of our own turns the qualifying window stays open before the
+# conversation moves on. Two, so a lead who dodges the question once still
+# gets a second, differently-worded attempt.
+PIVOT_WINDOW_TURNS = 2
+
+# How many of our own recent openers the prompt is shown, so the agent can
+# see the formula it keeps reaching for.
+PREVIOUS_OPENERS_WINDOW = 5
+
+_WORDS = re.compile(r"\w+")
+_OPENER_END = re.compile(r"[.!?…\n]")
+
+# Leading acknowledgment formulas. The client's complaint was two messages in
+# a row opening with "Понял, спасибо за уточнение." — one prompt rule cannot
+# be trusted with that, so the formula is also cut structurally. Both the
+# comma-joined and the dash-joined forms occur, hence the punctuation class.
+_ACK_OPENER = re.compile(
+    r"^\s*(?:понял[аи]?|понятно|ясно|хорошо|отлично"
+    r"|спасибо(?:\s+за\s+[\w-]+(?:\s+[\w-]+)?)?"
+    r"|благодарю(?:\s+за\s+[\w-]+(?:\s+[\w-]+)?)?"
+    r"|got\s+it|thanks(?:\s+for\s+[\w-]+(?:\s+[\w-]+)?)?|thank\s+you"
+    r"|makes\s+sense|noted|i\s+see)"
+    r"[^.!?…\n]{0,30}?[.!?…—–,]+\s+",
+    re.IGNORECASE,
+)
+
+# What must survive a strip for it to be worth doing.
+_MIN_STRIPPED_CHARS = 15
+_MIN_STRIPPED_WORDS = 3
 
 
 def _humanize_age(when: datetime, now: datetime) -> str:
@@ -133,6 +168,125 @@ def _load_recent_messages(deal, limit: int = RECENT_MESSAGES_WINDOW) -> list:
     return list(reversed(list(qs)))
 
 
+def _load_deal_messages(deal) -> list:
+    """Every ChatMessage for this deal's lead since the deal opened.
+
+    Scoped on ``deal.creation_date`` on purpose: these accounts carry
+    months of human conversations that predate the bot, and an old thread
+    must not look like engagement the bot earned.
+    """
+    from chat.models import ChatMessage
+    from django.contrib.contenttypes.models import ContentType
+
+    ct = ContentType.objects.get_for_model(deal.lead.__class__)
+    qs = (
+        ChatMessage.objects
+        .filter(
+            content_type=ct,
+            object_id=deal.lead_id,
+            creation_date__gte=deal.creation_date,
+        )
+        .order_by("creation_date", "pk")
+    )
+    return list(qs)
+
+
+def _conversation_stage(messages: list) -> str:
+    """Which single strategy the prompt should carry this turn.
+
+    Pure function of the message list — no DB writes, no LLM, nothing
+    persisted. The agent cannot compute this itself: it sees only
+    ``RECENT_MESSAGES_WINDOW`` messages, and ``chat_summary`` deliberately
+    stores no facts about our own turns, so it is blind to how far the
+    conversation has actually travelled.
+
+    Returns one of ``opening`` / ``answer_first`` / ``qualify`` / ``advance``.
+    """
+    anchor = None
+    sent_any = False
+    for index, message in enumerate(messages):
+        if message.is_outgoing:
+            sent_any = True
+            continue
+        # The first real answer, and only after we have spoken — otherwise a
+        # lead who wrote first would be met with a commercial question as our
+        # opening line.
+        if anchor is None and sent_any:
+            if len(_WORDS.findall(message.content or "")) >= MIN_SUBSTANTIVE_REPLY_WORDS:
+                anchor = index
+
+    if anchor is None:
+        return "opening"
+
+    # Checked before everything else: a lead asking us a question outranks
+    # any plan we had for this turn.
+    last = messages[-1]
+    if not last.is_outgoing and "?" in (last.content or ""):
+        return "answer_first"
+
+    our_turns_since = sum(1 for m in messages[anchor + 1:] if m.is_outgoing)
+    if our_turns_since >= PIVOT_WINDOW_TURNS:
+        return "advance"
+    return "qualify"
+
+
+def _previous_openers(messages: list, limit: int = PREVIOUS_OPENERS_WINDOW) -> list:
+    """Opening lines of our own recent messages, newest first, deduplicated.
+
+    Shown to the agent so it can see the formula it keeps reaching for. The
+    rolling ``chat_summary`` cannot help here — it stores facts about the
+    lead only, never about what we said.
+    """
+    openers: list = []
+    seen = set()
+    for message in reversed(messages):
+        if not message.is_outgoing:
+            continue
+        content = (message.content or "").strip()
+        if not content:
+            continue
+        opener = (_OPENER_END.split(content, 1)[0].strip() or content)[:80]
+        key = opener.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        openers.append(opener)
+        if len(openers) >= limit:
+            break
+    return openers
+
+
+def _strip_ack_opener(message: str) -> str:
+    """Delete leading acknowledgment formulas from an outgoing message.
+
+    Returns the original when what would remain is a fragment — better a
+    formulaic message than a truncated one. Applied repeatedly so a chained
+    opener ("Понял, спасибо за уточнение — ...") is fully removed.
+    """
+    text = message or ""
+    for _ in range(3):
+        stripped = _ACK_OPENER.sub("", text, count=1).strip()
+        if stripped == text.strip():
+            break
+        if len(stripped) < _MIN_STRIPPED_CHARS:
+            break
+        if len(_WORDS.findall(stripped)) < _MIN_STRIPPED_WORDS:
+            break
+        text = stripped
+
+    text = text.strip()
+    if text and text[:1].islower() and (message or "").strip()[:1].isupper():
+        text = text[0].upper() + text[1:]
+    return text or message
+
+
+def _qualifying_question(campaign) -> str:
+    """Campaign override when an operator set one, else the repo default."""
+    from linkedin.agents.follow_up_defaults import DEFAULT_QUALIFYING_QUESTION
+
+    return (campaign.qualifying_question or "").strip() or DEFAULT_QUALIFYING_QUESTION
+
+
 def _render_system_prompt(session, deal, recent_messages: list) -> str:
     """Render the agent system prompt from the Jinja2 template."""
     from django.utils import timezone
@@ -144,9 +298,19 @@ def _render_system_prompt(session, deal, recent_messages: list) -> str:
     self_prof = session.self_profile
     self_name = f"{self_prof.get('first_name', '')} {self_prof.get('last_name', '')}".strip() or session.django_user.username
 
+    history = _load_deal_messages(deal)
+    stage = _conversation_stage(history)
+    logger.info(
+        "follow_up stage for %s: %s (%d messages in this deal)",
+        deal.lead.public_identifier, stage, len(history),
+    )
+
     now = timezone.now()
     return template.render(
         self_name=self_name,
+        conversation_stage=stage,
+        qualifying_question=_qualifying_question(campaign),
+        previous_openers=_previous_openers(history),
         product_docs=campaign.product_docs or "",
         campaign_objective=campaign.campaign_objective or "",
         booking_link=campaign.booking_link or "",
@@ -194,6 +358,12 @@ def run_follow_up_agent(session, deal) -> FollowUpDecision:
         decision = run_agent(agent, system_prompt).output
         if decision is None:
             raise RuntimeError(f"LLM returned unparseable response for follow-up of {public_id}")
+
+    if decision.action == "send_message" and decision.message:
+        trimmed = _strip_ack_opener(decision.message)
+        if trimmed != decision.message:
+            logger.info("follow_up for %s: stripped acknowledgment opener", public_id)
+            decision.message = trimmed
 
     logger.info("follow_up agent for %s: %s", public_id, decision.action)
     return decision

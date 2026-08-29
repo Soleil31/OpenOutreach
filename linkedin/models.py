@@ -34,6 +34,17 @@ def _default_cover_text_prompt_template() -> str:
     return DEFAULT_COVER_TEMPLATE
 
 
+_QUALIFYING_QUESTION_HELP = (
+    "Целевой вопрос, к которому бот переходит, как только лид дал "
+    "содержательный ответ. Формулируется как намерение, а не как "
+    "скрипт — бот переписывает его своими словами на языке лида и "
+    "привязывает к тому, что тот только что рассказал.\n\n"
+    "Оставьте поле пустым, чтобы использовать общий вопрос из "
+    "репозитория: тогда правка в коде приезжает на все аккаунты сама, "
+    "и три базы не расходятся. Заполняйте только если этой кампании "
+    "нужен свой вопрос."
+)
+
 _POST_PROMPT_HELP = (
     "Системный промпт для AI-генератора текста поста. Пишется как "
     "обычный текст с подстановками в фигурных скобках, например "
@@ -107,6 +118,14 @@ class Campaign(models.Model):
     users = models.ManyToManyField(User, blank=True, related_name="campaigns")
     product_docs = models.TextField(blank=True)
     campaign_objective = models.TextField(blank=True)
+    # Blank means "use the repo default" — deliberately NOT a callable
+    # default, so the text is not copied into every account's SQLite file
+    # where it would silently drift from the repo.
+    qualifying_question = models.TextField(
+        blank=True,
+        default="",
+        help_text=_QUALIFYING_QUESTION_HELP,
+    )
     booking_link = models.URLField(max_length=500, blank=True)
     is_freemium = models.BooleanField(default=False)
     outreach_enabled = models.BooleanField(default=True)
