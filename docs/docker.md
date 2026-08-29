@@ -91,3 +91,38 @@ The VNC server is exposed on port 5900. Use `make up-view` to auto-open it, or c
 ### Volume Mounts
 
 The pre-built `docker run` command uses a named Docker volume (`openoutreach_db`) mounted at `/app/data` for data persistence (database, config). The compose setup (`local.yml`) mounts the entire repo `.:/app` for live code editing during development.
+
+## Release Runbook
+
+There is no CI in this repo — `tests.yml` / `deploy.yml` / `docker.yml` were deleted in `b6326f3`. A release is built manually and pulled by each server.
+
+```sh
+# 1. Build and push. The registry is anonymously readable, so the servers
+#    need no credentials of their own.
+gcloud builds submit --project gen-lang-client-0289784019 --config cloudbuild.yaml .
+```
+
+Then, **one server at a time**:
+
+```sh
+# 2. Back up the database with the daemon stopped.
+docker stop openoutreach
+cp /var/lib/docker/volumes/openoutreach_openoutreach_db/_data/db.sqlite3 /root/backups/
+
+# 3. Pull, then start the DAEMON first and watch the migration apply.
+cd /home/conf/app/openoutreach
+docker compose pull
+docker compose up -d openoutreach
+docker logs -f openoutreach | grep -i applying
+
+# 4. Only then the admin.
+docker compose up -d openoutreach-admin
+```
+
+Three things that will bite you:
+
+- **Order matters.** Only `rundaemon` migrates (`call_command("migrate")` at startup). Start the admin first and it boots against a schema that does not yet know the states its changelist filters on — the queue page is then the first thing anyone sees fail.
+- **Remove stale bind mounts.** Servers may bind-mount `*_patched.py` files over paths inside the image; that is how hot fixes were shipped before this runbook existed. Each one silently shadows the new image. Grep `docker-compose.yml` for `:/app/` mounts and drop every one whose content is already in `main` — `md5sum` against the repo file tells you which.
+- **One server per day.** `_seed_deal_tasks` re-creates a follow_up for every CONNECTED deal at boot. After a long outage that is a burst of activity from an account that has been silent for weeks — exactly the pattern LinkedIn scores against you.
+
+`cloudbuild.yaml` pushes a single mutable tag, so there is no rollback handle today; add a `:sha-$SHORT_SHA` tag alongside it if you need one.

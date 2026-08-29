@@ -56,7 +56,7 @@ Three task types (handlers in `linkedin/tasks/`, signature: `handle_*(task, sess
 
 1. **`handle_connect`** — Unified via `ConnectStrategy` dataclass. Regular: `find_candidate()` from `pools.py`; freemium: `find_freemium_candidate()`. Unreachable detection after `MAX_CONNECT_ATTEMPTS` (3).
 2. **`handle_check_pending`** — Per-profile. Exponential backoff with jitter. On acceptance → enqueues `follow_up`.
-3. **`handle_follow_up`** — Per-profile. Calls `run_follow_up_agent()` which returns a `FollowUpDecision` (structured output: `send_message`/`mark_completed`/`wait`). Handler executes the decision deterministically.
+3. **`handle_follow_up`** — Per-profile. Loads the Deal first and drops the task unless the Deal is CONNECTED — checked *above* the rate-limit gate, so a stale task on a HANDOFF or COMPLETED deal dies instead of re-enqueueing itself hourly. Then calls `run_follow_up_agent()` which returns a `FollowUpDecision` (structured output: `send_message`/`mark_completed`/`wait`/`handoff`) and executes it deterministically. `handoff` sends one holding sentence, moves the Deal to HANDOFF, spools an alert through `linkedin/handoff.py` and enqueues nothing. While the newest stored message is inbound the agent's own `follow_up_hours` is capped at `LIVE_CONVERSATION_MAX_HOURS` (8) — a lead who just wrote should not wait three days for an answer.
 
 ## Qualification ML Pipeline
 
@@ -119,7 +119,9 @@ Three apps in `INSTALLED_APPS`:
 - **`llm.py`** — `get_llm_model()` factory: reads `SiteConfig`, dispatches via per-provider builders (OpenAI / Anthropic / Google / Groq / Mistral / Cohere / openai_compatible) to the right `pydantic_ai.models.Model`. Single LLM-construction boundary; call sites build `Agent(get_llm_model(), ...)` and invoke `agent.run_sync(...)`. Importing the module also runs `nest_asyncio.apply()` once — pydantic-ai's `run_sync` is the official-recommended sync entry point but its anyio internals leave the daemon thread's running-loop slot populated across calls, tripping `BaseEventLoop._check_running` (`RuntimeError: This/Cannot run the event loop`). `nest_asyncio.apply()` is the [official pydantic-ai workaround](https://pydantic.dev/docs/ai/overview/troubleshooting/) and patches the loop to allow re-entrant `run_until_complete`.
 - **`exceptions.py`** — `AuthenticationError`, `TerminalStateError`, `SkipProfile`, `ReachedConnectionLimit`.
 - **`onboarding.py`** — Interactive setup.
-- **`agents/follow_up.py`** — Follow-up agent. Single LLM call with structured output (`FollowUpDecision`). Conversation is read in Python and injected into the prompt. No tool-calling loop.
+- **`agents/follow_up.py`** — Follow-up agent. Single LLM call with structured output (`FollowUpDecision`). Conversation is read in Python and injected into the prompt. No tool-calling loop. `_conversation_stage()` picks the dialogue mode (`opening`/`answer_first`/`qualify`/`advance`) from the deal-scoped `ChatMessage` history, so the template renders exactly one strategy instead of always offering Discovery; `_previous_openers()` + `_strip_ack_opener()` kill repeated acknowledgment openers. New choices go on the existing `action` Literal, never as new pydantic fields — `codex_client._strictify_schema` marks every property required, so a new property would force the model to rule on it every call and a miss fails the task with no retry.
+- **`agents/follow_up_defaults.py`** — `DEFAULT_QUALIFYING_QUESTION`, the commercial pivot copy. Dependency-free; used whenever `Campaign.qualifying_question` is blank, which is the normal case — the text is deliberately not duplicated into each account's SQLite file.
+- **`handoff.py`** — Hot-lead alerts. Renders a ready-to-send plain-text message (lead's verbatim last reply, profile URL, profile facts, last turns) and drops it atomically into `OO_HANDOFF_SPOOL_DIR` for the host monitor to deliver. Mirrors `account_state.py`: the daemon holds no Telegram credentials. Never raises.
 - **`actions/`** — `connect.py` (`send_connection_request`), `status.py` (`get_connection_status`), `message.py` (`send_raw_message`), `profile.py` (profile extraction), `search.py` (LinkedIn search), `conversations.py` (`get_conversation`), `post.py` (`publish_text_post`/`publish_image_post`: spawn a one-shot desktop browser context and drive the composer UI; `_click_robust` JS-clicks composer buttons to bypass LinkedIn's `#interop-outlet` shadow-DOM overlay that intercepts pointer events).
 - **`api/client.py`** — `PlaywrightLinkedinAPI`: browser-context fetch (runs JS `fetch()` inside Playwright page for authentic headers). `timeout_ms` constructor param (default 30s). `get_profile()` with tenacity retry.
 - **`api/voyager.py`** — `LinkedInProfile` dataclass (url, urn, full_name, headline, positions, educations, country_code, supported_locales, connection_distance/degree). `parse_linkedin_voyager_response()`.
@@ -133,21 +135,22 @@ Three apps in `INSTALLED_APPS`:
 - **`setup/self_profile.py`** — `discover_self_profile()` — fetches self profile via Voyager API, sets `linkedin_profile.self_lead`.
 - **`setup/seeds.py`** — User-provided seed profiles: parse URLs, create Leads + QUALIFIED Deals.
 - **`management/setup_crm.py`** — Idempotent CRM bootstrap (Site creation).
-- **`admin.py`** — Django Admin: SiteConfig, Campaign, LinkedInProfile, SearchKeyword, ActionLog, Task, ChatMessage.
+- **`admin.py`** — Django Admin: SiteConfig, Campaign, LinkedInProfile, SearchKeyword, ActionLog, Task, ChatMessage (list shows the body, the direction and an `is_outgoing` filter — without them it was useless for triage).
+- **`crm/admin.py`** — Deal and Lead admin. `state=Handoff` on the Deal changelist *is* the hot-lead queue; actions "Вернуть боту" (back to CONNECTED, which re-enqueues a follow_up through the scheduler hook) and "Закрыть как converted". Until this module existed neither model was visible in the admin at all.
 - **`django_settings.py`** — Django settings (SQLite at `data/db.sqlite3`). Apps: crm, chat, linkedin.
 
 
 ## Configuration
 
-- **`SiteConfig`** (DB singleton) — `llm_provider` (required, defaults to `openai`; choices: `openai`/`anthropic`/`google`/`groq`/`mistral`/`cohere`/`openai_compatible`), `llm_api_key` (required), `ai_model` (required), `llm_api_base` (required only for `openai_compatible`). Editable via Django Admin.
+- **`SiteConfig`** (DB singleton) — `llm_provider` (required, defaults to `openai`; choices: `openai`/`anthropic`/`google`/`groq`/`mistral`/`cohere`/`openai_compatible`/`codex`), `llm_api_key` (required), `ai_model` (required), `llm_api_base` (required only for `openai_compatible`). Editable via Django Admin. `codex` routes through `agents/codex_client.py` to the local gateway instead of pydantic-ai — that is what the production accounts run, and it uses strict JSON-schema structured output.
 - **`conf.py` schedule** — `ENABLE_ACTIVE_HOURS` (`True`), `ACTIVE_START_HOUR` (9), `ACTIVE_END_HOUR` (19), `ACTIVE_TIMEZONE` (system-local IANA name, falls back to "UTC"), `REST_DAYS` ((5, 6) = Sat+Sun). Daemon sleeps outside this window.
 - **`conf.py:CAMPAIGN_CONFIG`** — `min_ready_to_connect_prob` (0.9), `min_positive_pool_prob` (0.20), `connect_delay_seconds` (10), `connect_no_candidate_delay_seconds` (300), `check_pending_recheck_after_hours` (24), `check_pending_jitter_factor` (0.2), `qualification_n_mc_samples` (100), `enrich_min_delay_seconds` (6), `enrich_max_delay_seconds` (10), `enrich_max_per_page` (10), `burst_min_seconds` (2700), `burst_max_seconds` (3900), `break_min_seconds` (600), `break_max_seconds` (1200), `min_action_interval` (120), `embedding_model` ("BAAI/bge-small-en-v1.5").
-- **Prompt templates** (at `linkedin/templates/prompts/`) — `qualify_lead.j2` (temp 0.7), `search_keywords.j2` (temp 0.9), `follow_up_agent.j2`.
+- **Prompt templates** (at `linkedin/templates/prompts/`) — `qualify_lead.j2` (temp 0.7), `search_keywords.j2` (temp 0.9), `follow_up_agent.j2`. Read from disk on every call and shipped inside the image, with no DB copy and no per-campaign override — so editing one here reaches every account on the next build. Only `product_docs`, `campaign_objective`, `booking_link` and `qualifying_question` come from the `Campaign` row, as template *variables*.
 - **`requirements/`** — `base.txt`, `local.txt`, `production.txt`, `crm.txt` (empty — DjangoCRM installed via `--no-deps`).
 
 ## Docker
 
-Base image: `mcr.microsoft.com/playwright/python:v1.55.0-noble`. VNC on port 5900. `BUILD_ENV` arg selects requirements. Dockerfile at `compose/linkedin/Dockerfile`. Install: uv pip → DjangoCRM `--no-deps` → requirements → Playwright chromium.
+Base image: `python:3.12-slim-bookworm` (two stages, `deps` then `runtime`; Chromium is installed into `/opt/pw-browsers` by Playwright, not inherited from a Playwright base image). VNC on port 5900. `BUILD_ENV` arg selects requirements. Dockerfile at `compose/linkedin/Dockerfile`. Install: uv pip → DjangoCRM `--no-deps` → requirements → Playwright chromium.
 
 ## CI/CD
 

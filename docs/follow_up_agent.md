@@ -32,6 +32,8 @@ handle_follow_up()           ← linkedin/tasks/follow_up.py
     │ send_message   → send DM, record action, re-enqueue   │
     │ wait           → re-enqueue (no message sent)          │
     │ mark_completed → close Deal with structured outcome    │
+    │ handoff        → holding DM, Deal→HANDOFF, alert a      │
+    │                  human, enqueue NOTHING                 │
     └────────────────────────────────────────────────────────┘
 ```
 
@@ -41,16 +43,64 @@ Structured LLM output defined in `linkedin/agents/follow_up.py`:
 
 | Field | Type | Required When |
 |-------|------|---------------|
-| `action` | `"send_message"` / `"mark_completed"` / `"wait"` | always |
-| `message` | `str` | `send_message` |
+| `action` | `"send_message"` / `"mark_completed"` / `"wait"` / `"handoff"` | always |
+| `message` | `str` | `send_message`, `handoff` |
 | `outcome` | `Outcome` enum | `mark_completed` |
-| `follow_up_hours` | `float` | always (agent decides the pace) |
+| `follow_up_hours` | `float` | always (agent decides the pace; ignored for `handoff`) |
 
 Outcome values: `converted`, `not_interested`, `wrong_fit`, `no_budget`,
 `has_solution`, `bad_timing`, `unresponsive`.
 
 Validated by a Pydantic `model_validator` — the LLM call fails if required
 fields are missing for the chosen action.
+
+New choices go on the existing `action` Literal, never as a new field. On the
+codex path `codex_client._strictify_schema` forces `required` to list every
+property, so an added field would make the model rule on it on every single
+call — and one bad verdict fails the task with no retry.
+
+## Conversation Stages
+
+The mode is decided in Python, not by the model: it sees only
+`RECENT_MESSAGES_WINDOW` (6) messages, and `chat_summary` deliberately holds no
+facts about our own turns, so it cannot know how far the conversation has
+travelled. `_conversation_stage()` reads the whole deal-scoped history and the
+template renders exactly one mode.
+
+| Stage | When | What the prompt says |
+|-------|------|----------------------|
+| `opening` | the lead has not answered substantively *after we spoke* | one Mom-Test discovery question |
+| `answer_first` | the lead's last message is a question | answer honestly, thank them, do not pitch |
+| `qualify` | the lead engaged, and we have spent fewer than `PIVOT_WINDOW_TURNS` turns since | ask the commercial question, rewritten in their language |
+| `advance` | the commercial question is already out | never re-ask it; work toward a next step |
+
+`answer_first` is checked before the counters, so a lead asking "why are you
+asking me this?" always gets an answer instead of a pitch. `opening` requires
+that *we* spoke first, otherwise a lead who opens the thread would be met with
+a commercial question as our very first line. History older than
+`deal.creation_date` is excluded — these accounts carry months of human
+conversations that must not look like engagement the bot earned.
+
+The question text comes from `Campaign.qualifying_question` when an operator
+filled it, otherwise from `agents/follow_up_defaults.py`. Blank is the normal
+state and means "use the repo default", so the copy is not duplicated into
+every account's SQLite file where it would silently drift.
+
+## Not Sounding Like a Bot
+
+Two independent guards against the same failure — consecutive messages opening
+with the same formula ("Понял, спасибо за уточнение."):
+
+- **Prompt side.** `previous_openers` lists the first line of our last five
+  messages with an instruction not to reuse them, and `## Voice` bans
+  acknowledgment openers outright.
+- **Python side.** `_strip_ack_opener()` removes the formula structurally after
+  the decision — no LLM call, cannot raise, always terminates. It handles both
+  the comma-joined and dash-joined forms, and returns the message untouched
+  when only a fragment would remain.
+
+The Python half exists because a prompt rule catches the *second* occurrence at
+best; this one catches the first.
 
 ## Agent Context
 
@@ -158,10 +208,45 @@ Called from three places:
 | Failure | Recovery |
 |---------|----------|
 | Send failed (all 3 strategies) | Deal reverted to QUALIFIED for re-connection |
+| Send failed on a `handoff` | Deal still moves to HANDOFF and the alert still fires — a hot lead reaches a human even when LinkedIn refuses the message |
 | No Deal found for public_id | Task skipped with warning |
+| Deal is not CONNECTED | Task dropped, nothing re-enqueued (checked before the rate limiter) |
 | Rate limit exhausted | Task re-enqueued in 1 hour |
 | LLM returns unparseable output | `RuntimeError` raised, daemon stops |
 | 401 / `AuthenticationError` | Daemon re-authenticates, resets task to pending |
+| Handoff spool unwritable | Logged, returns False; the daemon keeps running |
+
+## Handoff
+
+When the lead asks to talk — proposes or accepts a call, asks for price or
+terms, hands over a phone or email, asks for a person — the agent picks
+`handoff`. The handler sends one short holding sentence, moves the Deal to
+`HANDOFF`, spools an alert and **enqueues nothing**. The missing task is the
+feature: the bot must not keep writing over the salesperson who takes over.
+
+Idempotency is free rather than bolted on. `HANDOFF` is absent from
+`_seed_deal_tasks`'s `active_states`, so `reconcile()` — which re-fires
+`on_deal_state_entered` for every active deal on every idle cycle — never
+revisits a handed-over deal. One handoff, one alert, forever.
+
+The alert itself is a ready-to-send plain-text file written by
+`linkedin/handoff.py` into `OO_HANDOFF_SPOOL_DIR` (default `/tmp/handoff`,
+bind-mounted to `/var/openoutreach-tmp/handoff`). The daemon holds no Telegram
+credentials — those live on the host, and `fire-monitor.sh:check_handoff()` in
+the owlgram repo does the posting. It carries the lead's verbatim last message,
+the profile URL, the first profile facts (`Lead` stores no human name) and the
+last turns.
+
+A human picks it up in the Django admin: filter Deals by `state=Handoff`. The
+"Вернуть боту" action puts the deal back to CONNECTED, and the scheduler hook
+re-enqueues the follow_up that HANDOFF withheld.
+
+**Latency.** This is a poll, not a push: a reply is only read when that lead's
+own follow_up task fires. While the newest stored message is inbound, the
+agent's chosen `follow_up_hours` is capped at `LIVE_CONVERSATION_MAX_HOURS`
+(8). This cannot fight `_too_soon_to_nudge`, which only trips when the last
+message is ours. An inbox sweep would cut this to minutes and is deliberately
+not built yet.
 
 ## Prompt Strategy (Mom Test)
 
