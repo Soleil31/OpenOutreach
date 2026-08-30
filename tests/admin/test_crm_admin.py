@@ -67,6 +67,37 @@ class TestChangelists:
 
 
 @pytest.mark.django_db
+class TestChangelistStaysCheap:
+    """Regression lock: 353s vs 0.02s on the real Netherlands database."""
+
+    def test_heavy_blobs_are_deferred(self, fake_session):
+        from crm.admin import DealAdmin
+        from django.contrib.admin.sites import site
+        from django.test import RequestFactory
+
+        _handed_over_deal(fake_session)
+        request = RequestFactory().get("/admin/crm/deal/")
+        deferred = DealAdmin(Deal, site).get_queryset(request).query.deferred_loading[0]
+
+        # Campaign.model_blob is a ~21MB pickled GPR model and Lead.embedding a
+        # 1536-byte vector. ORDER BY makes SQLite materialise every joined row
+        # before LIMIT, so select_related without these defers reads the blob
+        # once per deal.
+        assert "campaign__model_blob" in deferred
+        assert "lead__embedding" in deferred
+
+    def test_changelist_does_not_annotate_the_last_reply(self, fake_session):
+        """A correlated Subquery is evaluated before LIMIT — 14x slower here."""
+        from crm.admin import DealAdmin
+        from django.contrib.admin.sites import site
+        from django.test import RequestFactory
+
+        _handed_over_deal(fake_session)
+        request = RequestFactory().get("/admin/crm/deal/")
+        assert DealAdmin(Deal, site).get_queryset(request).query.annotations == {}
+
+
+@pytest.mark.django_db
 class TestReturnToBot:
     def test_moves_the_deal_back_and_enqueues_a_follow_up(self, fake_session):
         """Proves transition_deal fires the scheduler hook without a session."""

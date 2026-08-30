@@ -8,7 +8,6 @@ so the only way to see the pipeline was sqlite3 on the server.
 """
 from django.contrib import admin, messages
 from django.contrib.contenttypes.models import ContentType
-from django.db.models import OuterRef, Subquery
 from django.utils.html import format_html, format_html_join
 
 from chat.models import ChatMessage
@@ -56,19 +55,26 @@ class DealAdmin(admin.ModelAdmin):
     readonly_fields = ("profile", "conversation", "creation_date", "update_date")
     ordering = ("-update_date",)
     actions = ("return_to_bot", "close_as_converted")
+    # The changelist's own count() is enough; the extra unfiltered total is not
+    # worth a second full scan of a table this size.
+    show_full_result_count = False
 
     def get_queryset(self, request):
-        lead_ct = ContentType.objects.get_for_model(Lead)
-        newest_reply = (
-            ChatMessage.objects
-            .filter(content_type=lead_ct, object_id=OuterRef("lead_id"), is_outgoing=False)
-            .order_by("-creation_date", "-pk")
-            .values("content")[:1]
-        )
+        # The two defers are not an optimisation, they are what makes this page
+        # load at all. `Campaign.model_blob` holds the pickled GPR model and
+        # `Lead.embedding` a 1536-byte vector; ORDER BY forces SQLite to
+        # materialise every joined row before LIMIT, so select_related drags
+        # both blobs across all ~6.8k deals. Measured on the Netherlands
+        # database: 353s with them, 0.02s without.
+        #
+        # `last_lead_reply` is filled per displayed row rather than by a
+        # Subquery annotation for the same reason — a correlated subquery in
+        # the SELECT list is evaluated before LIMIT too. Measured on the same
+        # data: 0.488s annotated vs 0.035s for 100 per-row lookups.
         return (
             super().get_queryset(request)
             .select_related("lead", "campaign")
-            .annotate(_last_lead_reply=Subquery(newest_reply))
+            .defer("campaign__model_blob", "lead__embedding")
         )
 
     @admin.display(description="LinkedIn")
@@ -77,7 +83,20 @@ class DealAdmin(admin.ModelAdmin):
 
     @admin.display(description="Последний ответ лида")
     def last_lead_reply(self, obj):
-        text = getattr(obj, "_last_lead_reply", None) or ""
+        if not obj.lead_id:
+            return "—"
+        text = (
+            ChatMessage.objects
+            .filter(
+                content_type=ContentType.objects.get_for_model(Lead),
+                object_id=obj.lead_id,
+                is_outgoing=False,
+            )
+            .order_by("-creation_date", "-pk")
+            .values_list("content", flat=True)
+            .first()
+        ) or ""
+        text = text.strip()
         return (text[:80] + "…") if len(text) > 80 else (text or "—")
 
     @admin.display(description="Переписка")
