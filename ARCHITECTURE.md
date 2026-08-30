@@ -136,6 +136,7 @@ Three apps in `INSTALLED_APPS`:
 - **`setup/seeds.py`** — User-provided seed profiles: parse URLs, create Leads + QUALIFIED Deals.
 - **`management/setup_crm.py`** — Idempotent CRM bootstrap (Site creation).
 - **`admin.py`** — Django Admin: SiteConfig, Campaign, LinkedInProfile, SearchKeyword, ActionLog, Task, ChatMessage (list shows the body, the direction and an `is_outgoing` filter — without them it was useless for triage).
+- **Query trap — `Campaign.model_blob`.** The pickled GPR model lives in a `BinaryField` on the Campaign row (20.9 MB on the Netherlands account). Any `select_related("campaign")` combined with an `ORDER BY` forces SQLite to materialise the joined row — blob included — for every candidate before `LIMIT` applies. The Deal changelist did exactly that and took **353s**; `.defer("campaign__model_blob")` brought it to 2.7s. `Lead.embedding` is the same trap at smaller scale. Defer both in any list view.
 - **`crm/admin.py`** — Deal and Lead admin. `state=Handoff` on the Deal changelist *is* the hot-lead queue; actions "Вернуть боту" (back to CONNECTED, which re-enqueues a follow_up through the scheduler hook) and "Закрыть как converted". Until this module existed neither model was visible in the admin at all.
 - **`django_settings.py`** — Django settings (SQLite at `data/db.sqlite3`). Apps: crm, chat, linkedin.
 
