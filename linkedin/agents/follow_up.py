@@ -70,6 +70,62 @@ MIN_SUBSTANTIVE_REPLY_WORDS = 4
 # gets a second, differently-worded attempt.
 PIVOT_WINDOW_TURNS = 2
 
+# Hard ceiling on discovery. The client measured the cost of not having one:
+# the word "Cexim" appeared in our messages in 9 of 127 dialogues (7%), because
+# the bot kept narrowing the topic instead of ever getting to the point. Three
+# of our questions and we pivot whether or not a pain signal showed up.
+PIVOT_AFTER_OUR_QUESTIONS = 3
+
+# The lead named a concrete operational problem in our domain. This fires the
+# pivot early — waiting for the counter after a signal like this just burns the
+# opening. Substring matching on stems, so Russian inflection is covered.
+_PAIN_SIGNAL = re.compile(
+    r"оборудован|станк|комплектующ|запчаст"
+    r"|поставщик|поставк|импорт|экспорт|вэд"
+    r"|таможн|растаможк|сертификац"
+    r"|платеж|платёж|оплат|расчет|расчёт|валют|swift|аккредитив|перевод"
+    r"|санкц|ограничен|комплаенс"
+    r"|логистик|маршрут|доставк|фрахт|контейнер|инкотермс",
+    re.IGNORECASE,
+)
+
+# The lead is ready to talk to a person. Everything here means "stop asking
+# questions and close the organisational detail in one message".
+_READY_SIGNAL = re.compile(
+    r"созвон|созвонит|перезвон|позвон|набер"
+    r"|давайте\s+(?:поговор|обсуд|пообщ)|можем\s+(?:поговор|обсуд|созвон)"
+    r"|слот|встрет|встреч"
+    r"|расскажите|интересно|подробне|презентац|коммерческ|кп\b"
+    r"|телефон|телеграм|telegram|whats\s?app|вотсап|вацап"
+    r"|\+7\s?\d|\bпочт|e-?mail|@[a-zA-Z][\w.-]{2,}",
+    re.IGNORECASE,
+)
+
+# An explicit refusal or open irritation. After one of these the only correct
+# move is a short, warm exit — the client flagged two dialogues where the bot
+# kept narrowing the question after "Нет, спасибо" and "Времени для встречи с
+# вами у меня нет. Добра вам!", and at hundreds of contacts that is what turns
+# into complaints about the company on LinkedIn.
+# A bare agreement. Meaningless alone, decisive right after we proposed a time
+# or asked for a contact — "Ок, жду" is a confirmed call, not small talk.
+_AFFIRMATIVE = re.compile(
+    r"^(?:ок|окей|ok|okay|да|ага|угу|хорошо|отлично|договорились|согласен"
+    r"|принял|жду|буду\s+ждать|давайте|идёт|идет|yes|sure|deal)\b",
+    re.IGNORECASE,
+)
+
+_STAND_DOWN = re.compile(
+    r"не\s*интересн|неинтересн|не\s+актуальн|не\s+нужн|не\s+требует"
+    r"|нет,?\s*спасибо|спасибо,?\s*нет"
+    r"|не\s+планиру|не\s+рассматрива|не\s+вижу\s+смысл"
+    r"|нет\s+времени|времени\s+.{0,20}нет"
+    r"|отпиш|не\s+пишите|прекрат|перестань|хватит"
+    r"|это\s+допрос|что\s+за\s+допрос"
+    r"|добра\s+вам|всего\s+доброго|всего\s+хорошего|удачи\s+вам"
+    r"|not\s+interested|no,?\s*thanks?|unsubscribe|stop\s+(?:writing|messaging)",
+    re.IGNORECASE,
+)
+
 # How many of our own recent openers the prompt is shown, so the agent can
 # see the formula it keeps reaching for.
 PREVIOUS_OPENERS_WINDOW = 5
@@ -195,7 +251,7 @@ def _load_deal_messages(deal) -> list:
     return list(qs)
 
 
-def _conversation_stage(messages: list) -> str:
+def _conversation_stage(messages: list, brand: str = "") -> str:
     """Which single strategy the prompt should carry this turn.
 
     Pure function of the message list — no DB writes, no LLM, nothing
@@ -204,8 +260,46 @@ def _conversation_stage(messages: list) -> str:
     stores no facts about our own turns, so it is blind to how far the
     conversation has actually travelled.
 
-    Returns one of ``opening`` / ``answer_first`` / ``qualify`` / ``advance``.
+    Returns one of ``stand_down`` / ``closing`` / ``answer_first`` /
+    ``opening`` / ``discovery`` / ``qualify`` / ``introduce`` / ``advance``.
     """
+    last = messages[-1] if messages else None
+    lead_spoke_last = last is not None and not last.is_outgoing
+    last_inbound_at = next(
+        (
+            i for i in range(len(messages) - 1, -1, -1)
+            if not messages[i].is_outgoing and (messages[i].content or "").strip()
+        ),
+        None,
+    )
+    last_inbound = messages[last_inbound_at] if last_inbound_at is not None else None
+
+    # 1. A refusal outranks every plan we had, and it is sticky: keyed on the
+    #    last thing the LEAD said, not on who spoke last. Otherwise our own
+    #    farewell moves the conversation on and the bot resumes questioning —
+    #    which is exactly what happened with андрей-бутов-b36930180, where two
+    #    more narrowing questions went out after "Времени для встречи с вами у
+    #    меня нет. Добра вам!".
+    if last_inbound is not None and _STAND_DOWN.search(last_inbound.content or ""):
+        return "stand_down"
+
+    # 2. A readiness signal is the moment to close one organisational detail,
+    #    not to ask another open question. Also sticky — once they have asked
+    #    to talk, drifting back into discovery is how the interest cools.
+    if last_inbound is not None and _READY_SIGNAL.search(last_inbound.content or ""):
+        return "closing"
+
+    # 3. A short "ок, жду" only means something next to what we said before it:
+    #    a slot or a contact request. On its own it carries no signal, so it is
+    #    read in context rather than added to the readiness pattern.
+    if lead_spoke_last and _AFFIRMATIVE.match((last.content or "").strip()):
+        previous_outgoing = next(
+            (m for m in reversed(messages[:-1]) if m.is_outgoing),
+            None,
+        )
+        if previous_outgoing is not None and _READY_SIGNAL.search(previous_outgoing.content or ""):
+            return "closing"
+
     anchor = None
     sent_any = False
     for index, message in enumerate(messages):
@@ -219,19 +313,70 @@ def _conversation_stage(messages: list) -> str:
             if len(_WORDS.findall(message.content or "")) >= MIN_SUBSTANTIVE_REPLY_WORDS:
                 anchor = index
 
+    # 3. They asked us something. Answering it honestly is the behaviour the
+    #    client singled out as the one to keep. Only once we have spoken,
+    #    though — a lead who opens the thread with a question gets the normal
+    #    warm opener, not a defence of why we are asking.
+    if sent_any and lead_spoke_last and "?" in (last.content or ""):
+        return "answer_first"
+
     if anchor is None:
         return "opening"
 
-    # Checked before everything else: a lead asking us a question outranks
-    # any plan we had for this turn.
-    last = messages[-1]
-    if not last.is_outgoing and "?" in (last.content or ""):
-        return "answer_first"
+    # 4. Pivot on whichever comes first: a concrete pain in our domain, or the
+    #    question budget running out.
+    pain_at = next(
+        (
+            i for i, m in enumerate(messages)
+            if not m.is_outgoing and _PAIN_SIGNAL.search(m.content or "")
+        ),
+        None,
+    )
+    # Index at which the budget ran out, not just how many we have asked —
+    # "how many of our messages came after the pivot became due" is what
+    # decides whether the commercial question is still owed.
+    asked = 0
+    budget_at = None
+    for index, message in enumerate(messages):
+        if message.is_outgoing and "?" in (message.content or ""):
+            asked += 1
+            if asked >= PIVOT_AFTER_OUR_QUESTIONS:
+                budget_at = index
+                break
 
-    our_turns_since = sum(1 for m in messages[anchor + 1:] if m.is_outgoing)
-    if our_turns_since >= PIVOT_WINDOW_TURNS:
-        return "advance"
-    return "qualify"
+    due_at = min(i for i in (pain_at, budget_at) if i is not None) if (
+        pain_at is not None or budget_at is not None
+    ) else None
+    if due_at is None:
+        return "discovery"
+
+    asked_since_pivot = sum(1 for m in messages[due_at + 1:] if m.is_outgoing)
+    if asked_since_pivot == 0:
+        return "qualify"
+
+    # 5. The qualifying question is out and answered — introduce ourselves,
+    #    once. Detected on our own text by the brand name, which only the
+    #    introduction carries.
+    if not _we_introduced(messages, brand):
+        return "introduce"
+
+    return "advance"
+
+
+def _we_introduced(messages: list, brand: str) -> bool:
+    """Have we already said who we are? Checked on our own outgoing text.
+
+    The brand name is the marker because the introduction is the only message
+    that carries it. With no brand configured there is nothing to introduce,
+    so the stage is skipped rather than looping forever.
+    """
+    brand = (brand or "").strip().lower()
+    if not brand:
+        return True
+    return any(
+        m.is_outgoing and brand in (m.content or "").lower()
+        for m in messages
+    )
 
 
 def _previous_openers(messages: list, limit: int = PREVIOUS_OPENERS_WINDOW) -> list:
@@ -291,6 +436,18 @@ def _qualifying_question(campaign) -> str:
     return (campaign.qualifying_question or "").strip() or DEFAULT_QUALIFYING_QUESTION
 
 
+def _self_introduction(campaign) -> str:
+    from linkedin.agents.follow_up_defaults import DEFAULT_SELF_INTRODUCTION
+
+    return (campaign.self_introduction or "").strip() or DEFAULT_SELF_INTRODUCTION
+
+
+def _brand_name(campaign) -> str:
+    from linkedin.agents.follow_up_defaults import DEFAULT_BRAND_NAME
+
+    return (campaign.brand_name or "").strip() or DEFAULT_BRAND_NAME
+
+
 def _render_system_prompt(session, deal, recent_messages: list) -> str:
     """Render the agent system prompt from the Jinja2 template."""
     from django.utils import timezone
@@ -303,7 +460,8 @@ def _render_system_prompt(session, deal, recent_messages: list) -> str:
     self_name = f"{self_prof.get('first_name', '')} {self_prof.get('last_name', '')}".strip() or session.django_user.username
 
     history = _load_deal_messages(deal)
-    stage = _conversation_stage(history)
+    brand = _brand_name(campaign)
+    stage = _conversation_stage(history, brand)
     logger.info(
         "follow_up stage for %s: %s (%d messages in this deal)",
         deal.lead.public_identifier, stage, len(history),
@@ -314,6 +472,11 @@ def _render_system_prompt(session, deal, recent_messages: list) -> str:
         self_name=self_name,
         conversation_stage=stage,
         qualifying_question=_qualifying_question(campaign),
+        self_introduction=_self_introduction(campaign),
+        brand_name=brand,
+        brand_introduced=_we_introduced(history, brand),
+        pivot_after_questions=PIVOT_AFTER_OUR_QUESTIONS,
+        handover_contacts=(campaign.handover_contacts or "").strip(),
         previous_openers=_previous_openers(history),
         product_docs=campaign.product_docs or "",
         campaign_objective=campaign.campaign_objective or "",

@@ -131,6 +131,122 @@ class TestConversationStage:
         assert _conversation_stage(messages) == "answer_first"
 
 
+BRAND = "Cexim Group"
+
+
+class TestScriptStages:
+    """The script the client specified: opener → discovery → qualify →
+    introduce → advance, with refusal and readiness overriding everything."""
+
+    def _stage(self, pairs):
+        from linkedin.agents.follow_up import _conversation_stage
+
+        return _conversation_stage([_msg(c, o) for c, o in pairs], BRAND)
+
+    def test_discovery_holds_while_nothing_concrete_was_said(self):
+        assert self._stage([
+            ("Видел профиль — чем занимаетесь?", True),
+            ("Занимаемся сборкой узлов, всё довольно стандартно", False),
+        ]) == "discovery"
+
+    def test_a_named_pain_pivots_immediately(self):
+        """No waiting for the counter once they name the actual problem."""
+        assert self._stage([
+            ("Видел профиль", True),
+            ("Возим оборудование из Китая, с платежами постоянные сложности", False),
+        ]) == "qualify"
+
+    def test_the_question_budget_pivots_without_any_signal(self):
+        from linkedin.agents.follow_up import PIVOT_AFTER_OUR_QUESTIONS
+
+        pairs = [("Видел профиль, чем занимаетесь?", True), ("Управляю производством узлов", False)]
+        for i in range(PIVOT_AFTER_OUR_QUESTIONS - 1):
+            pairs += [(f"А как у вас устроено {i}?", True), ("Ну, по-разному бывает у нас", False)]
+        assert self._stage(pairs) == "qualify"
+
+    def test_introduce_fires_once_the_commercial_question_is_answered(self):
+        assert self._stage([
+            ("Видел профиль", True),
+            ("Возим оборудование сами, платежи через банк идут туго", False),
+            ("А напрямую возите или через подрядчика?", True),
+            ("Напрямую, своими силами", False),
+        ]) == "introduce"
+
+    def test_advance_once_we_have_named_ourselves(self):
+        assert self._stage([
+            ("Видел профиль", True),
+            ("Возим оборудование сами, с платежами беда", False),
+            ("А напрямую или через подрядчика?", True),
+            ("Напрямую", False),
+            (f"Мы в {BRAND} занимаемся финансовой логистикой.", True),
+            ("Понятно, спасибо за пояснение", False),
+        ]) == "advance"
+
+
+class TestRefusalAndReadinessOverride:
+    def _stage(self, pairs):
+        from linkedin.agents.follow_up import _conversation_stage
+
+        return _conversation_stage([_msg(c, o) for c, o in pairs], BRAND)
+
+    @pytest.mark.parametrize("refusal", [
+        "Нет, спасибо. Эта последовательность понятна",
+        "Времени для встречи с вами у меня нет. Добра вам!",
+        "Не интересно, извините",
+        "Это допрос какой-то",
+        "Not interested, thanks",
+    ])
+    def test_a_refusal_stops_the_script(self, refusal):
+        assert self._stage([("Видел профиль", True), (refusal, False)]) == "stand_down"
+
+    def test_a_refusal_stays_in_force_after_our_own_reply(self):
+        """The bot kept narrowing after андрей-бутов said no — twice."""
+        assert self._stage([
+            ("Видел профиль", True),
+            ("Возим оборудование, платежи сложные", False),
+            ("Времени для встречи с вами у меня нет. Добра вам!", False),
+            ("Понял, не буду отвлекать.", True),
+        ]) == "stand_down"
+
+    @pytest.mark.parametrize("signal", [
+        "Лучше, полагаю, созвониться",
+        "Интересно, расскажите подробнее",
+        "Мой номер +79832100002, напишите в Максе",
+        "Можем запланировать созвон и обсудить голосом",
+        "Пишите на importsales@fesco.com",
+    ])
+    def test_readiness_moves_straight_to_closing(self, signal):
+        assert self._stage([("Видел профиль", True), (signal, False)]) == "closing"
+
+    def test_closing_holds_after_we_proposed_a_slot(self):
+        """Otherwise the bot drifts back to questions and the interest cools."""
+        assert self._stage([
+            ("Видел профиль", True),
+            ("Давайте созвонимся", False),
+            ("Отлично, давайте завтра в 11:00 по Москве.", True),
+        ]) == "closing"
+
+    def test_a_bare_ok_confirms_a_proposed_slot(self):
+        assert self._stage([
+            ("Видел профиль", True),
+            ("Возим оборудование, платежи идут туго", False),
+            ("Давайте завтра в 11:30, напишу в Telegram.", True),
+            ("Ок, жду", False),
+        ]) == "closing"
+
+    def test_a_bare_ok_on_its_own_means_nothing(self):
+        assert self._stage([
+            ("Видел профиль, чем занимаетесь?", True),
+            ("Ок", False),
+        ]) == "opening"
+
+    def test_a_refusal_outranks_a_readiness_word(self):
+        assert self._stage([
+            ("Видел профиль", True),
+            ("Созвон не нужен, не интересно", False),
+        ]) == "stand_down"
+
+
 class TestStripAckOpener:
     """Request #3 — the deterministic half, which catches the first repeat."""
 
@@ -267,7 +383,8 @@ class TestStagedPrompt:
             ("да, возим оборудование сами", False),
             ("а платежи как проводите?", True),
             ("через банк", False),
-            ("любопытно", True),
+            ("Мы в Cexim Group занимаемся финансовой логистикой.", True),
+            ("понятно", False),
         )
         prompt = _render_system_prompt(session, deal, [])
 

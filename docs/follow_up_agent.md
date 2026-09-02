@@ -67,15 +67,28 @@ facts about our own turns, so it cannot know how far the conversation has
 travelled. `_conversation_stage()` reads the whole deal-scoped history and the
 template renders exactly one mode.
 
+Priority order — the first match wins:
+
 | Stage | When | What the prompt says |
 |-------|------|----------------------|
+| `stand_down` | the last *inbound* message is a refusal or open irritation | one warm sentence, no question, then `mark_completed` |
+| `closing` | the last *inbound* message signals readiness (a call, contacts, "расскажите", "интересно"), or a bare "ок" answers a slot we proposed | introduce if not yet, then ONE concrete step — a named time or a direct ask for phone/Telegram |
+| `answer_first` | we have spoken and the lead's last message is a question | answer honestly, thank them, do not pitch |
 | `opening` | the lead has not answered substantively *after we spoke* | one Mom-Test discovery question |
-| `answer_first` | the lead's last message is a question | answer honestly, thank them, do not pitch |
-| `qualify` | the lead engaged, and we have spent fewer than `PIVOT_WINDOW_TURNS` turns since | ask the commercial question, rewritten in their language |
-| `advance` | the commercial question is already out | never re-ask it; work toward a next step |
+| `discovery` | engaged, no pain named, budget not spent | one more question, and say the budget out loud |
+| `qualify` | a pain was named, or `PIVOT_AFTER_OUR_QUESTIONS` (3) is spent | ask the commercial question, rewritten in their language |
+| `introduce` | the commercial question is answered and we have never named ourselves | one plain sentence on who we are, then ONE question or a soft CTA |
+| `advance` | the introduction is out | never re-ask the commercial question; work toward a next step |
 
-`answer_first` is checked before the counters, so a lead asking "why are you
-asking me this?" always gets an answer instead of a pitch. `opening` requires
+`stand_down` and `closing` key on the last *inbound* message rather than on who
+spoke last, so they survive our own reply. Without that the bot answered
+андрей-бутов's "Времени для встречи с вами у меня нет. Добра вам!" and then
+narrowed the question twice more, and it drifted from a readiness signal back
+into discovery while the interest cooled.
+
+A refusal outranks everything, then readiness, then their question. So "why are
+you asking me this?" always gets an answer instead of a pitch — and "нет,
+спасибо" gets neither. `opening` requires
 that *we* spoke first, otherwise a lead who opens the thread would be met with
 a commercial question as our very first line. History older than
 `deal.creation_date` is excluded — these accounts carry months of human

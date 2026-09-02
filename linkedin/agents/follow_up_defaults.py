@@ -21,3 +21,16 @@ DEFAULT_QUALIFYING_QUESTION = (
     "оборудование и проводят платежи напрямую сами или привлекают "
     "специализированных подрядчиков под импорт и расчёты?"
 )
+
+
+# The introduction the bot owes every lead. The client measured its absence:
+# the company name appeared in our messages in 9 of 127 dialogues (7%), so in
+# most conversations the contact never learned who was asking or why.
+DEFAULT_SELF_INTRODUCTION = (
+    "Мы в Cexim Group занимаемся финансовой логистикой, товарным "
+    "сопровождением и параллельным импортом."
+)
+
+# Written exactly as it must appear in messages — "Cexim" alone is wrong.
+# Also used to detect whether the introduction has already been sent.
+DEFAULT_BRAND_NAME = "Cexim Group"

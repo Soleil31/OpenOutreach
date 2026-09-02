@@ -126,6 +126,33 @@ class Campaign(models.Model):
         default="",
         help_text=_QUALIFYING_QUESTION_HELP,
     )
+    self_introduction = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Как бот представляется после ответа на целевой вопрос. Одна-две "
+            "фразы, по делу. Пусто — берётся общий текст из репозитория."
+        ),
+    )
+    brand_name = models.CharField(
+        max_length=120,
+        blank=True,
+        default="",
+        help_text=(
+            "Название компании ровно в том виде, в каком оно должно стоять в "
+            "сообщениях. По нему же определяется, представились мы уже или "
+            "нет. Пусто — берётся из репозитория."
+        ),
+    )
+    handover_contacts = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Телефон / Telegram, которые бот даёт лиду при переводе на "
+            "человека. Пока пусто — бот просит контакт у лида, а свой не "
+            "называет."
+        ),
+    )
     booking_link = models.URLField(max_length=500, blank=True)
     is_freemium = models.BooleanField(default=False)
     outreach_enabled = models.BooleanField(default=True)
