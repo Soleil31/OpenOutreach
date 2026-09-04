@@ -212,9 +212,70 @@ def reconcile(session) -> None:
     _recover_stale_running_tasks()
     _seed_connect_tasks(session)
     _seed_deal_tasks(session)
+    seed_posts_from_topics(session)
 
     pending_count = Task.objects.pending().count()
     logger.info("Task queue reconciled: %d pending tasks", pending_count)
+
+
+def enqueue_generate_post(post_id: int, campaign_id: int, delay_seconds: float = 5) -> bool:
+    """Enqueue a generate_post task that fills the Post's body.
+
+    ``PostAdmin.regenerate_posts`` has always called this; until now the
+    function did not exist and the admin action raised ImportError. Dedup on
+    ``post_id`` — one pending generation per Post.
+    """
+    return _insert_task(
+        task_type=Task.TaskType.GENERATE_POST,
+        payload={"post_id": post_id, "campaign_id": campaign_id},
+        delay_seconds=delay_seconds,
+        dedup_keys=["post_id"],
+    )
+
+
+def seed_posts_from_topics(session) -> int:
+    """Turn the client's unconsumed topics into posts awaiting generation.
+
+    This is the arrow that never existed: topics could be entered in the admin
+    and nothing ever picked them up. Runs from ``reconcile``, so a topic added
+    at any time is collected on the next idle cycle.
+
+    Guarded by ``posting_enabled`` — a campaign that has not opted in must not
+    start producing drafts, and both dead accounts must stay quiet.
+    """
+    from linkedin.models import Post, PostTopic
+
+    created = 0
+    for campaign in session.campaigns:
+        if not campaign.posting_enabled:
+            continue
+        topics = PostTopic.objects.filter(
+            campaign=campaign, consumed_at__isnull=True, post__isnull=True,
+        ).order_by("created_at", "id")
+        for topic in topics:
+            post = Post.objects.create(
+                campaign=campaign,
+                topic=topic.prompt,
+                text="",
+                language=topic.language or campaign.post_language or "",
+                include_hashtags=topic.include_hashtags,
+                hashtags_count=topic.hashtags_count,
+                cta=topic.cta,
+                media_mode=topic.media_mode,
+                image_template_key=topic.image_template_key,
+                source=Post.Source.GENERATED_TOPIC,
+                status=Post.Status.PENDING_REVIEW,
+            )
+            # Mark the topic consumed in the same breath as creating the post:
+            # a crash between the two would re-create the post on every cycle.
+            topic.post = post
+            topic.consumed_at = timezone.now()
+            topic.save(update_fields=["post", "consumed_at", "updated_at"])
+            enqueue_generate_post(post.pk, campaign.pk)
+            created += 1
+    if created:
+        logger.info("Seeded %d post(s) from topics", created)
+    return created
 
 
 def enqueue_publish_post(post_id: int, delay_seconds: float = 10) -> bool:

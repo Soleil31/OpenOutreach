@@ -52,11 +52,15 @@ Task creation is centralized in `linkedin/tasks/scheduler.py`. No other module i
 
 The daemon calls `reconcile()` whenever the queue has no ready task — startup and every idle cycle. This is the retry mechanism: a handler that crashes mid-execution leaves a FAILED task with no successor, and the next idle cycle re-creates it from the Deal's state. `AuthenticationError` (401) triggers `session.reauthenticate()` then marks the task FAILED; reconcile picks it up.
 
-Three task types (handlers in `linkedin/tasks/`, signature: `handle_*(task, session, qualifiers)`):
+Five task types (handlers in `linkedin/tasks/`, signature: `handle_*(task, session, qualifiers)`):
 
 1. **`handle_connect`** — Unified via `ConnectStrategy` dataclass. Regular: `find_candidate()` from `pools.py`; freemium: `find_freemium_candidate()`. Unreachable detection after `MAX_CONNECT_ATTEMPTS` (3).
 2. **`handle_check_pending`** — Per-profile. Exponential backoff with jitter. On acceptance → enqueues `follow_up`.
 3. **`handle_follow_up`** — Per-profile. Loads the Deal first and drops the task unless the Deal is CONNECTED — checked *above* the rate-limit gate, so a stale task on a HANDOFF or COMPLETED deal dies instead of re-enqueueing itself hourly. Then calls `run_follow_up_agent()` which returns a `FollowUpDecision` (structured output: `send_message`/`mark_completed`/`wait`/`handoff`) and executes it deterministically. `handoff` sends one holding sentence, moves the Deal to HANDOFF, spools an alert through `linkedin/handoff.py` and enqueues nothing. While the newest stored message is inbound the agent's own `follow_up_hours` is capped at `LIVE_CONVERSATION_MAX_HOURS` (8) — a lead who just wrote should not wait three days for an answer.
+4. **`handle_generate_post`** — Fills a `Post`'s body from its topic via `agents/post_generator.py` and leaves it `PENDING_REVIEW`; it never approves and never publishes. Skips any post that is no longer `PENDING_REVIEW` or already carries text, so a task queued before a human approved it cannot overwrite what they approved. A generation failure marks the Post `FAILED` — retryable from the admin — instead of raising into the queue. Enqueued by `seed_posts_from_topics()` (called from `reconcile`, gated on `Campaign.posting_enabled`) and by `PostAdmin.regenerate_posts`.
+5. **`handle_publish_post`** — Publishes an approved post through the desktop composer; cancels it instead when `approval_deadline` has passed.
+
+The publishing chain is `PostTopic` → `Post(text="")` → `generate_post` → human approval → `publish_post`. The first arrow did not exist before: topics could be entered in the admin and nothing ever consumed them, `enqueue_generate_post` was referenced by the admin but undefined, and `GENERATE_POST` had no handler. A topic is stamped `consumed_at` in the same step that creates its post, so `reconcile` running on every idle cycle cannot multiply drafts.
 
 ## Qualification ML Pipeline
 

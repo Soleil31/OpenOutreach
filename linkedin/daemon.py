@@ -30,6 +30,7 @@ from linkedin.models import Task
 from linkedin.tasks.check_pending import handle_check_pending
 from linkedin.tasks.connect import handle_connect
 from linkedin.tasks.follow_up import handle_follow_up
+from linkedin.tasks.generate_post import handle_generate_post
 from linkedin.tasks.publish_post import handle_publish_post
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ _HANDLERS = {
     Task.TaskType.CONNECT: handle_connect,
     Task.TaskType.CHECK_PENDING: handle_check_pending,
     Task.TaskType.FOLLOW_UP: handle_follow_up,
+    Task.TaskType.GENERATE_POST: handle_generate_post,
     Task.TaskType.PUBLISH_POST: handle_publish_post,
 }
 
@@ -48,6 +50,10 @@ TASK_WATCHDOG_SECONDS = {
     Task.TaskType.CONNECT: 10 * 60,
     Task.TaskType.CHECK_PENDING: 5 * 60,
     Task.TaskType.FOLLOW_UP: 10 * 60,
+    # Generation is an LLM call and never touches the browser, but it shares
+    # the watchdog table with everything else, and a missing entry would let a
+    # wedged gateway hold the queue indefinitely.
+    Task.TaskType.GENERATE_POST: 5 * 60,
     Task.TaskType.PUBLISH_POST: 5 * 60,
 }
 
