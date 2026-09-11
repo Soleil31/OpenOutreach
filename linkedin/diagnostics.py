@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import traceback
 from contextlib import contextmanager
 from datetime import datetime
@@ -11,9 +12,36 @@ from linkedin.conf import DIAGNOSTICS_DIR
 
 logger = logging.getLogger(__name__)
 
+# A crash storm writes one dump per failed task — an HTML page and a screenshot
+# each. On 2026-09-10 that was 15 881 folders in a single working window, and
+# 97 559 on 2026-09-04. The tenth copy of the same traceback teaches nobody
+# anything, and that volume is exactly why a host cleanup cron had to exist —
+# which then deleted the evidence every six hours before anyone read it.
+MAX_DUMPS_PER_HOUR = 12
+
+_recent_dumps: list[float] = []
+
+
+def _quota_allows() -> bool:
+    """True while this hour still has room for another dump."""
+    now = time.monotonic()
+    cutoff = now - 3600
+    _recent_dumps[:] = [stamp for stamp in _recent_dumps if stamp > cutoff]
+    if len(_recent_dumps) >= MAX_DUMPS_PER_HOUR:
+        return False
+    _recent_dumps.append(now)
+    return True
+
 
 def capture_failure(session, error: BaseException) -> None:
     """Save page HTML, screenshot, and error details into a per-failure folder."""
+    if not _quota_allows():
+        logger.debug(
+            "Diagnostics quota reached (%d/hour) — not dumping this failure",
+            MAX_DUMPS_PER_HOUR,
+        )
+        return
+
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     error_name = type(error).__name__
     folder = DIAGNOSTICS_DIR / f"{timestamp}_{error_name}"
