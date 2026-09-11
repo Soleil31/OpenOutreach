@@ -374,6 +374,88 @@ class _AuthBreaker:
         )
 
 
+class _CrashBreaker:
+    """Stops the daemon grinding through a crashing browser forever.
+
+    `_AuthBreaker` covers a dead *session*; this covers a dead *browser*. On
+    2026-09-10 Chromium started answering ``Page.evaluate: Target crashed``,
+    every connect task failed, ``reconcile`` re-created it immediately, and the
+    daemon retried the same lead roughly once a second — 15 881 failed tasks in
+    one working window, and 97 559 on 2026-09-04. Nothing throttled it because
+    the generic ``except Exception`` path marks the task failed and continues
+    with no delay at all.
+
+    The underlying cause was memory: the GP refit leaves ~90-190 MB in the
+    process per fit and never returns it, so after enough fits Chromium has no
+    headroom left inside the container limit and kills its own renderer. This
+    breaker does not fix that — it makes the symptom cost minutes instead of a
+    whole day, and it recycles the browser, which is what actually reclaims the
+    space Chromium needs.
+
+    Isolated failures are normal and must stay free: the counter only starts
+    costing time after ``PATIENCE`` consecutive failures, and any completed
+    task resets it.
+    """
+
+    PATIENCE = 3                       # consecutive failures tolerated at full speed
+    BACKOFF_SECONDS = (30, 120, 600)
+    MAX_CONSECUTIVE = 12               # past this the box is not going to recover alone
+
+    # Errors that mean the browser itself is gone rather than one page failing.
+    _CRASH_MARKERS = (
+        "target crashed",
+        "target closed",
+        "browser has been closed",
+        "connection closed",
+        "page.evaluate",
+        "session closed",
+    )
+
+    def __init__(self, account: str = ""):
+        self.account = account
+        self.consecutive = 0
+        # Read by _park_and_idle for the heartbeat text.
+        self.reason = ""
+
+    @classmethod
+    def looks_like_a_crash(cls, error: BaseException) -> bool:
+        text = f"{type(error).__name__}: {error}".lower()
+        return any(marker in text for marker in cls._CRASH_MARKERS)
+
+    @property
+    def tripped(self) -> bool:
+        return self.consecutive >= self.MAX_CONSECUTIVE
+
+    def reset(self) -> None:
+        if not self.consecutive:
+            return
+        logger.info(
+            colored("Tasks recovered", "green", attrs=["bold"])
+            + " after %d consecutive failure(s)", self.consecutive,
+        )
+        self.consecutive = 0
+        account_state.clear_ok(self.account)
+
+    def record_failure(self, error: BaseException) -> int:
+        self.consecutive += 1
+        self.reason = "browser_crash" if self.looks_like_a_crash(error) else "task_failures"
+        if self.consecutive >= self.PATIENCE:
+            account_state.write(
+                account_state.PARKED if self.tripped else account_state.DEGRADED,
+                account=self.account,
+                reason=self.reason,
+                detail=f"{type(error).__name__}: {error}"[:500],
+                attempts=self.consecutive,
+            )
+        return self.consecutive
+
+    def backoff_seconds(self) -> int:
+        if self.consecutive < self.PATIENCE:
+            return 0
+        index = min(self.consecutive - self.PATIENCE, len(self.BACKOFF_SECONDS) - 1)
+        return self.BACKOFF_SECONDS[index]
+
+
 def _park_and_idle(breaker: "_AuthBreaker", heartbeat: "Heartbeat") -> None:
     """Stay alive but touch nothing: heartbeat only, never LinkedIn."""
     while True:
@@ -419,7 +501,9 @@ def run_daemon(session):
     cloud_promo = _CloudPromoRotator(interval=86400)
     heartbeat = Heartbeat()
     rhythm = _HumanRhythmBreak(heartbeat)
-    breaker = _AuthBreaker(getattr(session.linkedin_profile, "linkedin_username", ""))
+    account_name = getattr(session.linkedin_profile, "linkedin_username", "")
+    breaker = _AuthBreaker(account_name)
+    crash_breaker = _CrashBreaker(account_name)
     account_state.clear_ok(breaker.account)
 
     # Single-threaded: one task at a time, no concurrent enqueuing,
@@ -515,10 +599,45 @@ def run_daemon(session):
                 + "\n%s\nCheck llm_provider, ai_model, llm_api_key, and llm_api_base in Admin → Site Configuration.", e,
             )
             return
-        except Exception:
+        except Exception as task_error:
             task.mark_failed()
             logger.exception("Task %s failed", task)
+
+            attempts = crash_breaker.record_failure(task_error)
+
+            # A crashed browser will crash the next task too. Drop it so the
+            # next task opens a fresh one — this is also what reclaims the
+            # memory Chromium ran out of.
+            if _CrashBreaker.looks_like_a_crash(task_error):
+                logger.error(
+                    "Browser looks dead (%s) — closing the session so the next task reopens it",
+                    type(task_error).__name__,
+                )
+                try:
+                    session.close()
+                except Exception:
+                    logger.debug("session.close() raised while recycling", exc_info=True)
+
+            if crash_breaker.tripped:
+                logger.error(
+                    colored("Daemon parked — %d tasks failed in a row", "red", attrs=["bold"]),
+                    attempts,
+                )
+                _park_and_idle(crash_breaker, heartbeat)
+                return
+
+            wait = crash_breaker.backoff_seconds()
+            if wait:
+                logger.warning(
+                    "%d tasks failed in a row — backing off %ds before the next one",
+                    attempts, wait,
+                )
+                sleep_with_heartbeat(
+                    wait, heartbeat, f"backing off after {attempts} failed tasks",
+                )
             continue
+        else:
+            crash_breaker.reset()
 
         task.mark_completed()
         breaker.reset()
