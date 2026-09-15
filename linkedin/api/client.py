@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from linkedin.api.voyager import parse_linkedin_voyager_response, parse_connection_degree
+from linkedin.browser.reaper import kill_browser
 from linkedin.url_utils import url_to_public_id
 from linkedin.exceptions import (
     AuthenticationError,
@@ -84,20 +85,19 @@ class PlaywrightLinkedinAPI:
         The JS-side ``AbortController`` only fires while V8 is running; if
         Chromium is OOM-killed or the page is stuck on a consent/captcha
         overlay, ``page.evaluate`` blocks the Python thread indefinitely.
-        This watchdog closes the browser context after ``2 * timeout_ms`` so
-        the caller raises ``BrowserUnresponsiveError`` (an ``IOError``) and
-        the existing tenacity retry can try again on a fresh session.
+        After ``2 * timeout_ms`` this watchdog kills the browser — closing it
+        from the timer thread is a no-op, see ``linkedin.browser.reaper`` —
+        so the blocked call raises ``BrowserUnresponsiveError`` (an
+        ``IOError``). The browser is gone for good at that point: the task
+        fails, and the next ``ensure_browser`` launches a fresh one.
         """
         deadline_s = 2 * self.timeout_ms / 1000
         fired = threading.Event()
 
         def _kill():
             fired.set()
-            logger.error("Browser watchdog fired on %s — closing context", label)
-            try:
-                self.page.context.close()
-            except Exception:
-                logger.debug("context.close() raised inside watchdog", exc_info=True)
+            killed = kill_browser(self.session.playwright)
+            logger.error("Browser watchdog fired on %s — killed %d browser processes", label, killed)
 
         timer = threading.Timer(deadline_s, _kill)
         timer.daemon = True

@@ -57,6 +57,8 @@ Three task types (all handler functions in `linkedin/tasks/`, signature: `handle
 
 Daily and weekly rate limiters independently cap totals via `LinkedInProfile` methods (DB-backed via `ActionLog`).
 
+Every task runs under `_Watchdog` (`TASK_WATCHDOG_SECONDS` per type). At the deadline it SIGKILLs the Playwright driver and its Chromium tree from the timer thread (`browser/reaper.py`); the blocked call raises in the main thread, the session is torn down there, and the task fails with `BrowserUnresponsiveError`. If the main thread is still stuck `WATCHDOG_EXIT_GRACE_SECONDS` later, the process exits with code 75 and Docker restarts it. Closing the browser from the timer thread — what the watchdog did before — raises `greenlet.error` and changes nothing: NL sat silent for 18.5 h and 13 h on 2026-09-14/15 that way.
+
 Freemium campaigns use the same `connect` task type; the `ConnectStrategy` dataclass (built by `strategy_for()`) handles differences (candidate sourcing, delay, pre-connect hooks) based on `campaign.is_freemium`.
 
 ## Task Handlers (`linkedin/tasks/`)
@@ -141,7 +143,7 @@ Profile CRUD backed by Django models:
 
 - **Model**: `GaussianProcessRegressor` (scikit-learn, `ConstantKernel(1.0) * RBF(length_scale=sqrt(384))`) with BALD active learning. Wrapped in `Pipeline(StandardScaler, GPR)`.
 - **Input**: 384-dimensional FastEmbed embeddings (BAAI/bge-small-en-v1.5 by default).
-- **Lazy refit**: `update(embedding, label)` appends training data and invalidates the fit. `_fit_if_needed()` re-fits on ALL accumulated data (O(n^3)) when predictions are needed.
+- **Lazy refit**: `update(embedding, label)` appends training data and invalidates the fit. `_fit_if_needed()` re-fits on ALL accumulated data (O(n^3)) when predictions are needed. The first fit is cold (`n_restarts_optimizer=3`); every later one starts from the previous fit's `kernel_` with no restarts — on ~2100 labels at 1.5 CPU that is 14 s instead of 207 s with identical predictions, and the cold version pushed connect tasks past their watchdog.
 - **`predict(embedding)`** — Returns `(prob, entropy, std)` or `None` if unfitted (cold start / single class).
 - **`predict_probs(embeddings)`** — Returns P(f > 0.5) array (used by confidence gate and acquisition).
 - **`compute_bald(embeddings)`** — Computes BALD via MC sampling from the GP posterior.

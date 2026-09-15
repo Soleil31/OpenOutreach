@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import threading
 import time
@@ -23,6 +24,7 @@ from linkedin.conf import (
 )
 from linkedin import account_state
 from linkedin.account_state import LoginBlocked
+from linkedin.browser import reaper
 from linkedin.diagnostics import failure_diagnostics
 from linkedin.exceptions import AuthenticationError, BrowserUnresponsiveError
 from linkedin.ml.qualifier import BayesianQualifier, KitQualifier
@@ -44,8 +46,8 @@ _HANDLERS = {
 }
 
 # Hard ceilings per task type — if a handler doesn't return inside this
-# window the watchdog closes the browser session to unwedge Playwright and
-# the daemon marks the task FAILED.
+# window the watchdog kills the browser to unwedge Playwright and the daemon
+# marks the task FAILED.
 TASK_WATCHDOG_SECONDS = {
     Task.TaskType.CONNECT: 10 * 60,
     Task.TaskType.CHECK_PENDING: 5 * 60,
@@ -56,6 +58,15 @@ TASK_WATCHDOG_SECONDS = {
     Task.TaskType.GENERATE_POST: 5 * 60,
     Task.TaskType.PUBLISH_POST: 5 * 60,
 }
+
+# Killing the driver unblocks a Playwright call within a second, so a main
+# thread still stuck this long afterwards is not coming back on its own.
+WATCHDOG_EXIT_GRACE_SECONDS = 5 * 60
+# Closing a crashed browser normally takes a second or two.
+RECYCLE_WATCHDOG_SECONDS = 60
+# EX_TEMPFAIL. docker-compose restarts the daemon on a non-zero exit.
+EXIT_WEDGED = 75
+_hard_exit = os._exit
 
 HEARTBEAT_INTERVAL = 300  # 5 minutes
 HEARTBEAT_SLICE = 60      # wake every minute during long sleeps
@@ -154,41 +165,92 @@ def sleep_with_heartbeat(seconds: float, heartbeat: Heartbeat, context: str) -> 
         heartbeat.maybe_log(context)
 
 
+class _Watchdog:
+    """Two-stage deadline for work that may block inside Playwright.
+
+    Stage one, after *timeout_s*: SIGKILL the browser from the timer thread —
+    ``linkedin.browser.reaper`` explains why nothing gentler works. The blocked
+    call raises in the main thread and the work unwinds normally.
+
+    Stage two, *grace_s* later: the main thread still has not come back, so it
+    is stuck somewhere killing the browser cannot reach. Exit the process and
+    let Docker restart the container. A silent daemon cost NL a whole working
+    day twice in a row; a restart costs a minute.
+    """
+
+    def __init__(self, timeout_s: float, session, label: str, grace_s: float | None = None):
+        self.timeout_s = timeout_s
+        self.grace_s = WATCHDOG_EXIT_GRACE_SECONDS if grace_s is None else grace_s
+        self.session = session
+        self.label = label
+        self.fired = threading.Event()
+        self._timers: list[threading.Timer] = []
+
+    def __enter__(self) -> "_Watchdog":
+        for delay, action in (
+            (self.timeout_s, self._kill_browser),
+            (self.timeout_s + self.grace_s, self._exit_process),
+        ):
+            timer = threading.Timer(delay, action)
+            timer.daemon = True
+            timer.start()
+            self._timers.append(timer)
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        for timer in self._timers:
+            timer.cancel()
+
+    def _kill_browser(self) -> None:
+        self.fired.set()
+        killed = reaper.kill_browser(getattr(self.session, "playwright", None))
+        logger.error(
+            "Watchdog fired on %s after %ds — killed %d browser processes",
+            self.label, self.timeout_s, killed,
+        )
+
+    def _exit_process(self) -> None:
+        logger.critical(
+            "%s is still stuck %ds after the browser was killed — exiting so the container restarts",
+            self.label, self.grace_s,
+        )
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+        _hard_exit(EXIT_WEDGED)
+
+
 def run_task_with_watchdog(handler, task, session, qualifiers) -> None:
     """Execute *handler* under a per-task hard ceiling.
 
-    On timeout, closes the browser session to unwedge Playwright. The
-    handler's next call into the closed session raises (Playwright error),
-    which propagates out and the daemon's generic-except path marks the
-    task FAILED; reconcile re-creates it on the next idle cycle. If the
-    handler somehow returns despite the timer firing, we raise
-    ``BrowserUnresponsiveError`` so the task is still marked failed.
+    On timeout the watchdog kills the browser, the handler's blocked
+    Playwright call raises, the session is torn down here in the main thread
+    and the task fails with ``BrowserUnresponsiveError``; reconcile re-creates
+    it on the next idle cycle. Failure diagnostics run inside the same
+    deadline: ``page.content()`` on a frozen renderer blocks as surely as the
+    handler did.
     """
     timeout_s = TASK_WATCHDOG_SECONDS.get(task.task_type, 10 * 60)
-    fired = threading.Event()
-
-    def _unwedge():
-        fired.set()
-        logger.error(
-            "Task watchdog fired on %s after %ds — closing browser", task, timeout_s,
-        )
+    with _Watchdog(timeout_s, session, str(task)) as watchdog:
         try:
+            with failure_diagnostics(session):
+                handler(task, session, qualifiers)
+        except Exception as error:
+            if not watchdog.fired.is_set():
+                raise
             session.close()
-        except Exception:
-            logger.debug("session.close() raised inside watchdog", exc_info=True)
+            raise BrowserUnresponsiveError(
+                f"Task {task} watchdog fired after {timeout_s}s"
+            ) from error
 
-    timer = threading.Timer(timeout_s, _unwedge)
-    timer.daemon = True
-    timer.start()
-    try:
-        handler(task, session, qualifiers)
-    finally:
-        timer.cancel()
-
-    if fired.is_set():
-        raise BrowserUnresponsiveError(
-            f"Task {task} watchdog fired after {timeout_s}s"
-        )
+        # The handler returned, but only after the browser was killed under it.
+        if watchdog.fired.is_set():
+            session.close()
+            raise BrowserUnresponsiveError(
+                f"Task {task} watchdog fired after {timeout_s}s"
+            )
 
 
 # ── Human-rhythm pacing ──────────────────────────────────────────────
@@ -558,8 +620,7 @@ def run_daemon(session):
             continue
 
         try:
-            with failure_diagnostics(session):
-                run_task_with_watchdog(handler, task, session, qualifiers)
+            run_task_with_watchdog(handler, task, session, qualifiers)
         except AuthenticationError as auth_error:
             logger.warning("Session expired during %s — re-authenticating", task)
             reason, detail = "session_expired", str(auth_error)[:500]
@@ -614,7 +675,8 @@ def run_daemon(session):
                     type(task_error).__name__,
                 )
                 try:
-                    session.close()
+                    with _Watchdog(RECYCLE_WATCHDOG_SECONDS, session, "closing a crashed browser"):
+                        session.close()
                 except Exception:
                     logger.debug("session.close() raised while recycling", exc_info=True)
 

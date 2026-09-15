@@ -6,6 +6,7 @@ import random
 import time
 from functools import cached_property
 
+from linkedin.browser.reaper import driver_gone
 from linkedin.conf import MIN_DELAY, MAX_DELAY
 
 logger = logging.getLogger(__name__)
@@ -44,8 +45,11 @@ class AccountSession:
         """Launch or recover browser + login if needed. Call before using .page"""
         from linkedin.browser.login import start_browser_session
 
-        if not self.page or self.page.is_closed():
+        if not self.page or self.page.is_closed() or driver_gone(self.playwright):
             logger.debug("Launching/recovering browser for %s", self)
+            # Tear the old one down first: overwriting it left its Chromium running.
+            if self.playwright is not None:
+                self.close()
             start_browser_session(session=self)
         else:
             self._maybe_refresh_cookies()
@@ -99,16 +103,29 @@ class AccountSession:
                 return
 
     def close(self):
-        if self.context:
+        if self.context or self.playwright:
+            if driver_gone(self.playwright):
+                # context.close() would wait forever for the dead driver's
+                # "closed" event. stop() still has to run: it is what shuts the
+                # event loop down for the next sync_playwright().start().
+                closers = (self.playwright.stop,)
+            else:
+                closers = (
+                    getattr(self.context, "close", None),
+                    getattr(self.browser, "close", None),
+                    getattr(self.playwright, "stop", None),
+                )
             try:
-                self.context.close()
-                if self.browser:
-                    self.browser.close()
-                if self.playwright:
-                    self.playwright.stop()
-                logger.info("Browser closed gracefully (%s)", self)
-            except Exception as e:
-                logger.debug("Error closing browser: %s", e)
+                # One failing step must not skip the rest — a skipped stop()
+                # is the "Sync API inside the asyncio loop" trap.
+                for closer in closers:
+                    if closer is None:
+                        continue
+                    try:
+                        closer()
+                    except Exception as e:
+                        logger.debug("Error closing browser: %s", e)
+                logger.info("Browser closed (%s)", self)
             finally:
                 self.page = self.context = self.browser = self.playwright = None
 

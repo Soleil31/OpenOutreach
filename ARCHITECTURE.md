@@ -46,7 +46,9 @@ Single write path: `apply(config)` — idempotent, creates missing Campaign, Lin
 
 ## Task Queue
 
-Persistent queue backed by `Task` model. Worker loop in `daemon.py`: `seconds_until_active()` guard pauses outside active hours/rest days → pop oldest due task → set campaign on session → RUNNING → dispatch via `_HANDLERS` dict → COMPLETED/FAILED. Failures captured by `failure_diagnostics()` context manager.
+Persistent queue backed by `Task` model. Worker loop in `daemon.py`: `seconds_until_active()` guard pauses outside active hours/rest days → pop oldest due task → set campaign on session → RUNNING → dispatch via `_HANDLERS` dict → COMPLETED/FAILED. Failures captured by `failure_diagnostics()` context manager, which runs inside the task's watchdog: `page.content()` on a frozen renderer blocks as surely as the handler did.
+
+Every task runs under `_Watchdog` (`TASK_WATCHDOG_SECONDS` per type). At the deadline it SIGKILLs the Playwright driver and its Chromium tree from the timer thread (`browser/reaper.py`), the blocked call raises in the main thread, the session is closed there and the task fails with `BrowserUnresponsiveError`. `WATCHDOG_EXIT_GRACE_SECONDS` later, a main thread that still has not returned makes the process exit with code 75 so Docker restarts it. Sync Playwright objects cannot be touched from another thread — the old watchdog's `session.close()` raised `greenlet.error`, was logged at DEBUG, and left NL silent for 18.5 h and 13 h on 2026-09-14/15.
 
 Task creation is centralized in `linkedin/tasks/scheduler.py`. No other module inserts Task rows. The module exposes three layers: (1) low-level `enqueue_connect`/`enqueue_check_pending`/`enqueue_follow_up` with per-call dedup against existing PENDING rows, (2) a state-transition hook `on_deal_state_entered(deal)` fired by `set_profile_state()` that picks the right task for the new state, and (3) `reconcile(session)` which walks CRM state and recreates missing tasks.
 
@@ -72,6 +74,8 @@ GPR (sklearn, ConstantKernel * RBF) inside Pipeline(StandardScaler, GPR) with BA
 
 384-dim FastEmbed embeddings stored directly on Lead model, per-campaign GP models at ``Campaign.model_blob` (BinaryField, joblib-dumped with `compress=3`)`. Cold start returns None until >=2 labels of both classes.
 
+Every label invalidates the fit. The first fit is cold with `n_restarts_optimizer=3`; later refits start from the previous `kernel_` with no restarts. On the NL copy (2118 labels, 1.5 CPU) that is 14 s instead of 207 s with the same kernel, the same LML and max |ΔP(f>0.5)| = 0.0000 over 800 unlabelled leads — and two cold refits were enough to push one connect task past its 10-minute watchdog.
+
 ## Django Apps
 
 Three apps in `INSTALLED_APPS`:
@@ -94,7 +98,7 @@ Three apps in `INSTALLED_APPS`:
 
 ## Key Modules
 
-- **`daemon.py`** — Worker loop with active-hours guard (`ENABLE_ACTIVE_HOURS` flag, `seconds_until_active()`), `_build_qualifiers()`, freemium import, `_CloudPromoRotator`. Calls `scheduler.reconcile()` when the queue has no ready task.
+- **`daemon.py`** — Worker loop with active-hours guard (`ENABLE_ACTIVE_HOURS` flag, `seconds_until_active()`), `_build_qualifiers()`, freemium import, `_CloudPromoRotator`. Calls `scheduler.reconcile()` when the queue has no ready task. `_Watchdog` (kill the browser, then exit the process) wraps every task and the teardown of a crashed browser.
 - **`diagnostics.py`** — `failure_diagnostics()` context manager, `capture_failure()` saves page HTML/screenshot/traceback to `/tmp/openoutreach-diagnostics/`.
 - **`tasks/scheduler.py`** — Single owner of Task row creation. Low-level `enqueue_*`, state-transition hook `on_deal_state_entered`, and `reconcile()`.
 - **`tasks/connect.py`** — `handle_connect`, `ConnectStrategy`.
@@ -110,7 +114,8 @@ Three apps in `INSTALLED_APPS`:
 - **`ml/embeddings.py`** — FastEmbed utilities, `embed_text()`, `embed_texts()`.
 - **`ml/profile_text.py`** — `build_profile_text()`.
 - **`ml/hub.py`** — HuggingFace kit loader (`fetch_kit()`).
-- **`browser/session.py`** — `AccountSession`: linkedin_profile, page, context, browser, playwright. `campaigns` cached_property (list, via Campaign.users M2M). `ensure_browser()` launches/recovers browser. `self_profile` cached_property (re-discovers via Voyager on first access per session — no DB cache; one extra scrape per daemon restart). Cookie expiry check via `_maybe_refresh_cookies()`. `reauthenticate()` forces fresh login (close browser, clear saved cookies, re-launch).
+- **`browser/session.py`** — `AccountSession`: linkedin_profile, page, context, browser, playwright. `campaigns` cached_property (list, via Campaign.users M2M). `ensure_browser()` launches/recovers browser, including after its driver died, and closes the old one first. `close()` only calls `playwright.stop()` when the driver is gone — `BrowserContext.close()` waits forever for a "closed" event a dead driver never sends — and never lets one failing step skip `stop()`. `self_profile` cached_property (re-discovers via Voyager on first access per session — no DB cache; one extra scrape per daemon restart). Cookie expiry check via `_maybe_refresh_cookies()`. `reauthenticate()` forces fresh login (close browser, clear saved cookies, re-launch).
+- **`browser/reaper.py`** — `kill_browser(playwright)` SIGKILLs the driver and its process tree without calling into Playwright, so watchdog threads can use it; `driver_gone(playwright)` tells whether the driver connection has died.
 - **`browser/registry.py`** — `get_or_create_session()`, `get_first_active_profile()`, `resolve_profile()`, `cli_parser()`/`cli_session()` (shared CLI bootstrap for `__main__` scripts).
 - **`browser/login.py`** — `start_browser_session()` — browser launch + LinkedIn login.
 - **`browser/nav.py`** — Navigation, auto-discovery, `goto_page()`.
