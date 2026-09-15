@@ -12,6 +12,8 @@ import os
 import pathlib
 import tempfile
 
+from tools.autoheal import config
+
 STATE_PATH = os.environ.get("AUTOHEAL_NOTIFY_PATH", "/var/openoutreach-tmp/oo-autoheal-state.json")
 
 
@@ -53,10 +55,16 @@ def incident_opened(incident) -> None:
 
 
 def incident_needs_human(incident) -> None:
+    # Про куки — только когда дело во входе. 15.09.2026 зависший сторож дал
+    # `unknown`, и совет импортировать куки отправил бы человека не туда.
+    if incident.reason in config.HUMAN_ONLY_REASONS or incident.reason == "session_expired":
+        action = "Демон дальше пробовать не будет. Нужен ручной вход и импорт кук."
+    else:
+        action = f"Это не вход и не вёрстка — разобрать по журналу инцидента: {incident.path}"
     _write("нужен человек", incident,
            f"Автопочинка неприменима: {incident.reason}.\n"
            f"{incident.data.get('detail','')}\n"
-           f"Демон дальше пробовать не будет. Нужен ручной вход и импорт кук.")
+           f"{action}")
 
 
 def verdict(incident, green: bool, detail: str) -> None:
