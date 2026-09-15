@@ -251,11 +251,19 @@ class BayesianQualifier:
         X_fit, y_fit = self._balance(X_arr, y_arr)
         n = X_fit.shape[0]
 
+        # Every new label invalidates the fit, and a cold fit with restarts on
+        # ~2100 labels takes 207 s at the container's 1.5 CPUs — two of them
+        # pushed a connect task past its 10-minute watchdog (NL, 2026-09-14/15).
+        # One label barely moves the optimum, so refits start from the last
+        # fitted hyperparameters. Measured on the NL copy: 14 s, identical
+        # kernel and LML, max |ΔP(f>0.5)| = 0.0000 over 800 unlabelled leads.
+        previous = self._pipeline.named_steps['gpr'].kernel_ if self._pipeline is not None else None
         self._pipeline = Pipeline([
             ('scaler', StandardScaler()),
             ('gpr', GaussianProcessRegressor(
-                kernel=ConstantKernel(1.0) * RBF(length_scale=np.sqrt(self.embedding_dim)),
-                n_restarts_optimizer=3,
+                kernel=previous if previous is not None
+                else ConstantKernel(1.0) * RBF(length_scale=np.sqrt(self.embedding_dim)),
+                n_restarts_optimizer=0 if previous is not None else 3,
                 random_state=self._seed,
                 alpha=0.1,
             )),

@@ -174,6 +174,43 @@ class TestWarmStart:
         np.testing.assert_allclose(result1[0], result2[0], atol=1e-6)
 
 
+class TestIncrementalRefit:
+    """Refit after a new label starts from the last fitted hyperparameters.
+
+    A cold fit with restarts on ~2100 labels took 207 s at 1.5 CPU on NL, and
+    two of them pushed a connect task past its 10-minute watchdog.
+    """
+
+    def test_first_fit_is_cold_with_restarts(self):
+        qualifier, _, _ = _make_trained_qualifier()
+        qualifier._fit_if_needed()
+        assert qualifier._pipeline.named_steps["gpr"].n_restarts_optimizer == 3
+
+    def test_refit_starts_from_the_previous_kernel_without_restarts(self):
+        qualifier, pos_emb, _ = _make_trained_qualifier()
+        qualifier._fit_if_needed()
+        fitted = qualifier._pipeline.named_steps["gpr"].kernel_
+
+        qualifier.update(pos_emb, 1)
+        qualifier._fit_if_needed()
+        gpr = qualifier._pipeline.named_steps["gpr"]
+
+        assert gpr.n_restarts_optimizer == 0
+        np.testing.assert_allclose(gpr.kernel.theta, fitted.theta)
+
+    def test_refit_predicts_like_a_cold_fit(self):
+        qualifier, pos_emb, neg_emb = _make_trained_qualifier()
+        qualifier._fit_if_needed()
+        extra = (pos_emb + neg_emb) / 2
+        qualifier.update(extra, 1)
+
+        cold = BayesianQualifier(seed=42)
+        cold.warm_start(np.array(qualifier._X), np.array(qualifier._y))
+
+        probe = np.array([pos_emb, neg_emb, extra])
+        np.testing.assert_allclose(qualifier.predict_probs(probe), cold.predict_probs(probe), atol=1e-3)
+
+
 class TestPoolHasTargets:
     def test_exploit_mode_no_high_prob(self):
         """Exploit mode (n_neg > n_pos), all P < 0.5 → False."""
