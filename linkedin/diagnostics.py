@@ -2,7 +2,10 @@
 """Capture page state on automation failures for post-mortem debugging."""
 from __future__ import annotations
 
+import faulthandler
 import logging
+import pathlib
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -50,6 +53,10 @@ def capture_failure(session, error: BaseException) -> None:
     # Error traceback
     tb = traceback.format_exception(type(error), error, error.__traceback__)
     (folder / "error.txt").write_text("".join(tb))
+    try:
+        (folder / "resources.txt").write_text(resource_snapshot())
+    except OSError as exc:
+        logger.debug("Failed to capture the resource snapshot: %s", exc)
 
     page = getattr(session, "page", None)
     if page is None or page.is_closed():
@@ -68,6 +75,79 @@ def capture_failure(session, error: BaseException) -> None:
         logger.debug("Failed to capture screenshot: %s", exc)
 
     logger.info("Failure diagnostics saved → %s", folder)
+
+
+_CGROUP = pathlib.Path("/sys/fs/cgroup")
+
+
+def _cgroup_value(name: str) -> str:
+    try:
+        return (_CGROUP / name).read_text().strip()
+    except OSError:
+        return "?"
+
+
+def _browser_processes() -> str:
+    """Живых процессов браузера — по ним утечка видна сразу."""
+    try:
+        return str(sum(
+            1 for entry in pathlib.Path("/proc").iterdir()
+            if entry.name.isdigit() and _comm_is_browser(entry)
+        ))
+    except OSError:
+        return "?"
+
+
+def _comm_is_browser(entry: pathlib.Path) -> bool:
+    try:
+        return "chrome" in (entry / "comm").read_text()
+    except OSError:  # процесс успел завершиться
+        return False
+
+
+def resource_snapshot() -> str:
+    """Счётчики контейнера на момент падения.
+
+    Стоит копейки, а без неё «почему упало» превращается в раскопки на хосте.
+    У ``can't start new thread`` и у убитого рендерера причина одна — утёкшие
+    браузеры, и видна она только здесь: один браузер это ~64 задачи при лимите
+    в 400, так что трёх-шести хватало, чтобы упереться.
+    """
+    return (
+        f"pids: {_cgroup_value('pids.current')} / {_cgroup_value('pids.max')}\n"
+        f"memory: {_cgroup_value('memory.current')} / {_cgroup_value('memory.max')}"
+        f" (peak {_cgroup_value('memory.peak')})\n"
+        f"browser processes: {_browser_processes()}\n"
+        f"python threads: {threading.active_count()}\n"
+    )
+
+
+def capture_wedge(label: str) -> pathlib.Path | None:
+    """Стеки всех потоков в момент, когда сторож счёл демона зависшим.
+
+    Именно этих улик не хватало 14 и 15.09.2026: контейнер жив, страница цела,
+    аккаунт здоров, а висит Python — и найти, где именно, удалось только
+    py-spy с хоста. Снимок делается ДО убийства браузера: после него
+    зависший поток развернётся, и стек будет уже не тот.
+    """
+    if not _quota_allows():
+        return None
+
+    folder = DIAGNOSTICS_DIR / f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_wedged"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        # error.txt — то, что читает классификатор автопочинки.
+        (folder / "error.txt").write_text(
+            f"BrowserUnresponsiveError: watchdog fired on {label}\n")
+        (folder / "resources.txt").write_text(resource_snapshot())
+        with (folder / "threads.txt").open("w") as handle:
+            faulthandler.dump_traceback(file=handle, all_threads=True)
+    except Exception:
+        logger.debug("Failed to capture the wedge dump", exc_info=True)
+        return None
+
+    logger.error("Wedge diagnostics saved → %s", folder)
+    return folder
 
 
 @contextmanager

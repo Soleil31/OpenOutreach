@@ -143,6 +143,47 @@ class TestWatchdog:
         assert stages.exits == [daemon.EXIT_WEDGED]
 
 
+class TestWedgeEvidence:
+    """Улики, которых не было 14 и 15.09.2026.
+
+    Контейнер жив, страница цела, аккаунт здоров — а висит Python. Дамп
+    страницы и скриншот в такой ситуации бесполезны: нужен стек потоков.
+    """
+
+    @pytest.fixture(autouse=True)
+    def dumps(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(diagnostics, "DIAGNOSTICS_DIR", tmp_path)
+        diagnostics._recent_dumps.clear()
+        return tmp_path
+
+    def test_thread_stacks_and_container_limits_land_in_the_dump(self):
+        folder = diagnostics.capture_wedge("connect [running]")
+
+        assert folder is not None
+        threads = (folder / "threads.txt").read_text()
+        assert "test_thread_stacks_and_container_limits_land_in_the_dump" in threads
+        resources = (folder / "resources.txt").read_text()
+        assert "pids:" in resources and "browser processes:" in resources
+        # error.txt читает классификатор автопочинки
+        assert "watchdog fired on connect" in (folder / "error.txt").read_text()
+
+    def test_a_storm_cannot_bury_the_disk(self):
+        for _ in range(diagnostics.MAX_DUMPS_PER_HOUR):
+            diagnostics._quota_allows()
+
+        assert diagnostics.capture_wedge("connect") is None
+
+    def test_evidence_is_taken_before_the_kill(self, monkeypatch):
+        order = []
+        monkeypatch.setattr(daemon, "capture_wedge", lambda label: order.append("улики"))
+        monkeypatch.setattr(reaper, "kill_browser", lambda playwright: order.append("убийство") or 1)
+
+        with daemon._Watchdog(0.05, SimpleNamespace(playwright=None), "stuck", grace_s=60):
+            time.sleep(0.4)
+
+        assert order == ["улики", "убийство"]
+
+
 class TestRunTaskWithWatchdog:
     @pytest.fixture(autouse=True)
     def _fast(self, monkeypatch, tmp_path):

@@ -25,7 +25,7 @@ from linkedin.conf import (
 from linkedin import account_state
 from linkedin.account_state import LoginBlocked
 from linkedin.browser import reaper
-from linkedin.diagnostics import failure_diagnostics
+from linkedin.diagnostics import capture_wedge, failure_diagnostics
 from linkedin.exceptions import AuthenticationError, BrowserUnresponsiveError
 from linkedin.ml.qualifier import BayesianQualifier, KitQualifier
 from linkedin.models import Task
@@ -203,6 +203,8 @@ class _Watchdog:
 
     def _kill_browser(self) -> None:
         self.fired.set()
+        # Сначала улики, потом убийство: после него зависший поток развернётся.
+        capture_wedge(self.label)
         killed = reaper.kill_browser(getattr(self.session, "playwright", None))
         logger.error(
             "Watchdog fired on %s after %ds — killed %d browser processes",

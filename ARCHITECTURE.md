@@ -99,7 +99,7 @@ Three apps in `INSTALLED_APPS`:
 ## Key Modules
 
 - **`daemon.py`** — Worker loop with active-hours guard (`ENABLE_ACTIVE_HOURS` flag, `seconds_until_active()`), `_build_qualifiers()`, freemium import, `_CloudPromoRotator`. Calls `scheduler.reconcile()` when the queue has no ready task. `_Watchdog` (kill the browser, then exit the process) wraps every task and the teardown of a crashed browser.
-- **`diagnostics.py`** — `failure_diagnostics()` context manager, `capture_failure()` saves page HTML/screenshot/traceback to `/tmp/openoutreach-diagnostics/`.
+- **`diagnostics.py`** — `failure_diagnostics()` context manager, `capture_failure()` saves page HTML/screenshot/traceback plus a `resource_snapshot()` (cgroup pids/memory, live browser processes, Python threads) to `/tmp/openoutreach-diagnostics/`. `capture_wedge(label)` is the watchdog's dump: stacks of **all** threads via `faulthandler`, taken before the browser is killed — a page screenshot says nothing when the browser is fine and Python is the thing that is stuck. Both obey `MAX_DUMPS_PER_HOUR`.
 - **`tasks/scheduler.py`** — Single owner of Task row creation. Low-level `enqueue_*`, state-transition hook `on_deal_state_entered`, and `reconcile()`.
 - **`tasks/connect.py`** — `handle_connect`, `ConnectStrategy`.
 - **`tasks/check_pending.py`** — `handle_check_pending`, exponential backoff.
