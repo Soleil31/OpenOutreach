@@ -11,13 +11,11 @@
 """
 from __future__ import annotations
 
-import json
 import pathlib
 import re
-import urllib.error
-import urllib.request
 
 from tools.autoheal import config
+from tools.autoheal.gateway import GatewayUnavailable, ask
 
 PATCH_SCHEMA = {
     "type": "object",
@@ -66,8 +64,8 @@ LinkedIn сменил вёрстку, и правила поиска элеме�
 Ответ — один JSON по заданной схеме, без пояснений вокруг."""
 
 
-class HealerUnavailable(RuntimeError):
-    """Шлюз недоступен или отказал — это не вина патча."""
+# Имя сохранено: его ловит run.py, а сам класс переехал в общий клиент шлюза.
+HealerUnavailable = GatewayUnavailable
 
 
 def _trim_html(html: str, limit: int = 120_000) -> str:
@@ -123,40 +121,12 @@ def build_prompt(incident, selectors_source: str) -> str:
 
 def request_patch(incident, selectors_source: str) -> dict:
     """Просит патч у шлюза. Бросает HealerUnavailable, если шлюз недоступен."""
-    payload = {
-        "system_prompt": SYSTEM_PROMPT,
-        "user_prompt": build_prompt(incident, selectors_source),
-        "json_response": True,
-        "json_schema": PATCH_SCHEMA,
-        "model": config.CODEX_MODEL,
-    }
-    request = urllib.request.Request(
-        config.CODEX_GATEWAY_URL.rstrip("/") + "/v1/chat",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    return ask(
+        SYSTEM_PROMPT,
+        build_prompt(incident, selectors_source),
+        PATCH_SCHEMA,
+        ("selectors_py", "changed_chains", "reasoning"),
     )
-    if config.CODEX_GATEWAY_TOKEN:
-        request.add_header("Authorization", "Bearer " + config.CODEX_GATEWAY_TOKEN)
-
-    try:
-        with urllib.request.urlopen(request, timeout=config.CODEX_TIMEOUT_SECONDS) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        raise HealerUnavailable(f"шлюз недоступен: {exc}") from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HealerUnavailable(f"шлюз ответил неожиданно: {exc}") from exc
-
-    content = body.get("content", "")
-    try:
-        patch = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise HealerUnavailable(f"ответ не разобрался как JSON: {exc}") from exc
-
-    for field in ("selectors_py", "changed_chains", "reasoning"):
-        if field not in patch:
-            raise HealerUnavailable(f"в ответе нет поля {field}")
-    return patch
 
 
 def sanity_check(patch: dict) -> tuple[bool, str]:

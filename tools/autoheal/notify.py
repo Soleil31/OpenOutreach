@@ -61,10 +61,22 @@ def incident_needs_human(incident) -> None:
         action = "Демон дальше пробовать не будет. Нужен ручной вход и импорт кук."
     else:
         action = f"Это не вход и не вёрстка — разобрать по журналу инцидента: {incident.path}"
+
+    # Черновая гипотеза едет прямо в сообщение: лежащий на диске разбор, о
+    # котором никто не знает, ничем не лучше его отсутствия.
+    diagnosis = incident.data.get("diagnosis") or {}
+    draft = ""
+    if diagnosis:
+        draft = (f"\n\nЧерновая гипотеза (уверенность: {diagnosis.get('confidence', '?')}):\n"
+                 f"{diagnosis.get('hypothesis', '')[:500]}\n"
+                 f"Разбор целиком: {incident.path}/diagnosis.md")
+        if diagnosis.get("has_patch"):
+            draft += f"\nЧерновик правки (НЕ применён): {incident.path}/suggested.patch"
+
     _write("нужен человек", incident,
            f"Автопочинка неприменима: {incident.reason}.\n"
            f"{incident.data.get('detail','')}\n"
-           f"{action}")
+           f"{action}{draft}")
 
 
 def verdict(incident, green: bool, detail: str) -> None:

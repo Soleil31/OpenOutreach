@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 
-from tools.autoheal import config, detect, heal, incidents, notify
+from tools.autoheal import config, detect, diagnose, heal, incidents, notify
 
 
 def _verify(repo: pathlib.Path, candidate: pathlib.Path) -> tuple[bool, str]:
@@ -51,9 +51,16 @@ def handle(server: str, repo: pathlib.Path, dry_run: bool) -> int:
          + (f", повтор {repeats}" if repeats else ""))
 
     if incident.state == incidents.NEEDS_HUMAN:
+        # Чинить этот класс кодом нечем, но прочитать улики за человека можно.
+        drafted = False
+        if incident.reason in config.DIAGNOSABLE_REASONS:
+            drafted = diagnose.write_draft(incident, repo)
+            if drafted:
+                _log(f"черновой разбор готов: {incident.path}/diagnosis.md")
+
         # Зовём один раз: поломка та же, человек уже знает. Раньше уведомление
         # уходило каждые 15 минут, потому что инцидент заводился заново.
-        if repeats == 0:
+        if repeats == 0 or drafted:
             notify.incident_needs_human(incident)
             _log("класс поломки не чинится кодом — позван человек")
         else:

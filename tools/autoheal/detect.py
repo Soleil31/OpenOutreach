@@ -29,12 +29,16 @@ def read_account_state() -> dict:
 
 
 def latest_evidence() -> pathlib.Path | None:
-    """Свежайший пакет улик, в котором есть страница."""
+    """Свежайший пакет улик.
+
+    Ищем по error.txt, а не по page.html: у дампа зависания страницы нет и быть
+    не может — там висит Python, а браузер как раз в порядке.
+    """
     root = pathlib.Path(config.DIAGNOSTICS_DIR)
     if not root.exists():
         return None
     try:
-        packages = sorted((p.parent for p in root.rglob("page.html")), reverse=True)
+        packages = sorted((p.parent for p in root.rglob("error.txt")), reverse=True)
     except OSError:
         # Крон уборки сносит дампы прямо во время обхода: шесть падений модуля
         # с 31.08.2026. Пропущенный прогон дешевле трассировки в логе — через
@@ -73,6 +77,10 @@ def reason_from_evidence(package: pathlib.Path) -> tuple[str, str]:
     if not error_file.exists():
         return "unknown", "пакет улик без error.txt"
     text = error_file.read_text(encoding="utf-8", errors="replace")
+    # Проверяем раньше остальных: сторож помечает свой дамп сам, и в нём лежат
+    # стеки всех потоков — единственные улики, по которым зависание разбирается.
+    if "watchdog fired on" in text:
+        return "wedge", "сторож счёл задачу зависшей, в дампе стеки потоков"
     if "No locator matched" in text:
         match = re.search(r"No locator matched on (\S+)", text)
         where = match.group(1) if match else "неизвестной странице"
@@ -131,7 +139,7 @@ def detect(server: str) -> incidents.Incident | None:
         incident.save()
 
     if package is not None and not (incident.path / "page.html").exists():
-        for name in ("page.html", "error.txt"):
+        for name in ("page.html", "error.txt", "resources.txt", "threads.txt"):
             source = package / name
             if source.exists():
                 incident.attach(name, source.read_text(encoding="utf-8", errors="replace"))
