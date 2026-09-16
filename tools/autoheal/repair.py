@@ -155,9 +155,12 @@ def check_diff(diff: str) -> tuple[bool, str]:
 
 def _worktree(repo: pathlib.Path, branch: str) -> pathlib.Path:
     path = pathlib.Path(config.WORKTREE_DIR) / branch.replace("/", "-")
+    path.parent.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(path, ignore_errors=True)
     _run(["git", "worktree", "prune"], cwd=repo)
-    created = _run(["git", "worktree", "add", "-b", branch, str(path), "HEAD"], cwd=repo)
+    # -B, а не -b: после неудачной попытки ветка с таким именем уже есть, и
+    # падать на этом — значит терять вторую попытку из-за мусора от первой.
+    created = _run(["git", "worktree", "add", "-B", branch, str(path), "HEAD"], cwd=repo)
     if created.returncode != 0:
         raise RuntimeError(f"не удалось создать рабочую копию: {created.stderr.strip()}")
     return path
