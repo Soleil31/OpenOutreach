@@ -71,6 +71,30 @@ HEALABLE_REASONS = ("locator_break",)
 # Классы, при которых немедленно зовут человека и ничего не чинят.
 HUMAN_ONLY_REASONS = ("checkpoint_2fa", "captcha", "bad_credentials")
 
+# Классы, за которыми следит мониторинг, а не этот модуль: смерть браузера
+# видна по deadman, самоперезапуску и состоянию аккаунта, и заводить на неё
+# инцидент — значит дублировать чужую работу шумом. С 31.08 по 16.09.2026 из
+# 697 заведённых инцидентов 367 были одним и тем же следом сломанного сторожа.
+MONITORED_REASONS = ("browser_crash", "task_failures")
+
+# По этим строкам в трассировке поломку относят к смерти браузера. Таймауты
+# сюда намеренно не входят: истёкшее ожидание элемента бывает и сменой вёрстки,
+# а её должен увидеть человек.
+BROWSER_DEATH_MARKERS = (
+    "Target crashed",
+    "Target closed",
+    "Browser has been closed",
+    "Connection closed while reading from the driver",
+    "BrowserUnresponsiveError",
+    "can't start new thread",
+    # След сторожа, обнулившего сессию под работающим обработчиком.
+    "'NoneType' object has no attribute 'wait_for_load_state'",
+)
+
+# Журнал инцидентов — для человека, а не архив: держим свежие и молодые.
+KEEP_INCIDENTS = _int("AUTOHEAL_KEEP_INCIDENTS", 50)
+KEEP_INCIDENT_DAYS = _int("AUTOHEAL_KEEP_DAYS", 14)
+
 CORPUS_DIR = os.environ.get("AUTOHEAL_CORPUS", "/var/lib/openoutreach-corpus")
 INCIDENTS_DIR = os.environ.get("AUTOHEAL_INCIDENTS", "/var/lib/openoutreach-incidents")
 DIAGNOSTICS_DIR = os.environ.get(

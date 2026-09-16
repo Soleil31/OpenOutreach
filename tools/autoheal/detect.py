@@ -33,7 +33,13 @@ def latest_evidence() -> pathlib.Path | None:
     root = pathlib.Path(config.DIAGNOSTICS_DIR)
     if not root.exists():
         return None
-    packages = sorted((p.parent for p in root.rglob("page.html")), reverse=True)
+    try:
+        packages = sorted((p.parent for p in root.rglob("page.html")), reverse=True)
+    except OSError:
+        # Крон уборки сносит дампы прямо во время обхода: шесть падений модуля
+        # с 31.08.2026. Пропущенный прогон дешевле трассировки в логе — через
+        # пятнадцать минут посмотрим снова.
+        return None
     return packages[0] if packages else None
 
 
@@ -73,12 +79,19 @@ def reason_from_evidence(package: pathlib.Path) -> tuple[str, str]:
         return "locator_break", f"элементы не находятся на {where}"
     if "AuthenticationError" in text:
         return "session_expired", "LinkedIn ответил 401"
+    for marker in config.BROWSER_DEATH_MARKERS:
+        if marker in text:
+            return "browser_crash", f"браузер умер: {marker}"
     last = [line for line in text.strip().splitlines() if line.strip()]
     return "unknown", (last[-1][:300] if last else "пустая трассировка")
 
 
-def detect(server: str) -> incidents.Incident | None:
-    """Возвращает инцидент, если есть что разбирать. Иначе None."""
+def classify() -> tuple[str, str, str, pathlib.Path | None]:
+    """(причина, детали, аккаунт, пакет улик). Ничего не создаёт и не пишет.
+
+    Отделено от detect(), чтобы вызывающий мог назвать класс поломки в логе,
+    не заводя инцидента: часть классов — не наша забота, а мониторинга.
+    """
     state = read_account_state()
     account = state.get("account", "")
     reason = state.get("reason", "")
@@ -88,11 +101,22 @@ def detect(server: str) -> incidents.Incident | None:
     if not reason and package is not None:
         reason, detail = reason_from_evidence(package)
 
+    # Здоровый аккаунт — закрывать нечего
+    if not reason or state.get("status") == "ok":
+        return "", "", account, package
+
+    return reason, detail, account, package
+
+
+def detect(server: str) -> incidents.Incident | None:
+    """Возвращает инцидент, если есть что разбирать. Иначе None."""
+    reason, detail, account, package = classify()
     if not reason:
         return None
 
-    # Здоровый аккаунт — закрывать нечего
-    if state.get("status") == "ok":
+    # Смерть браузера видна мониторингу по deadman, самоперезапуску и состоянию
+    # аккаунта. Заводить на неё инцидент — дублировать чужую работу шумом.
+    if reason in config.MONITORED_REASONS:
         return None
 
     fingerprint = fingerprint_of(package) if package else ""
@@ -114,16 +138,21 @@ def detect(server: str) -> incidents.Incident | None:
         incident.data["evidence_package"] = package.name
         incident.save()
 
+    # Состояние переставляем только при первом попадании: инцидент теперь живёт
+    # до разбора человеком, и без этой проверки каждый прогон дописывал бы в его
+    # историю одну и ту же строку.
     if reason in config.HUMAN_ONLY_REASONS:
-        incident.set_state(
-            incidents.NEEDS_HUMAN,
-            f"класс «{reason}» не чинится кодом — нужен человек")
+        if incident.state != incidents.NEEDS_HUMAN:
+            incident.set_state(
+                incidents.NEEDS_HUMAN,
+                f"класс «{reason}» не чинится кодом — нужен человек")
         return incident
 
     if reason not in config.HEALABLE_REASONS:
-        incident.set_state(
-            incidents.NEEDS_HUMAN,
-            f"класс «{reason}» не входит в перечень чинимых автоматически")
+        if incident.state != incidents.NEEDS_HUMAN:
+            incident.set_state(
+                incidents.NEEDS_HUMAN,
+                f"класс «{reason}» не входит в перечень чинимых автоматически")
         return incident
 
     return incident

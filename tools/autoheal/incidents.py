@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import json
 import pathlib
+import shutil
 import uuid
 
 from tools.autoheal import config
@@ -110,7 +111,11 @@ def open_incident(server: str, account: str, reason: str, detail: str,
 
 
 def find_open(server: str, reason: str = "", fingerprint: str = "") -> Incident | None:
-    closed = {RESOLVED, ROLLED_BACK, NEEDS_HUMAN}
+    # «Требует человека» — НЕ закрыто: поломка продолжается, пока её не
+    # разобрали. Пока это состояние считалось закрытым, каждый прогон крона
+    # заводил новый инцидент на ту же поломку — 697 каталогов и 159 МБ
+    # с 31.08 по 16.09.2026.
+    closed = {RESOLVED, ROLLED_BACK}
     for path in sorted(_root().glob("*/incident.json"), reverse=True):
         data = json.loads(path.read_text(encoding="utf-8"))
         if data["server"] != server or data["state"] in closed:
@@ -121,6 +126,33 @@ def find_open(server: str, reason: str = "", fingerprint: str = "") -> Incident 
             continue
         return Incident(data, path.parent)
     return None
+
+
+def prune(keep: int | None = None, keep_days: int | None = None) -> int:
+    """Убирает старые каталоги инцидентов, возвращает число удалённых.
+
+    Журнал читают глазами в момент разбора: архив за полгода в нём только
+    мешает, а вместе с приложенными страницами он ещё и занимает место —
+    159 МБ к 16.09.2026.
+    """
+    keep = config.KEEP_INCIDENTS if keep is None else keep
+    keep_days = config.KEEP_INCIDENT_DAYS if keep_days is None else keep_days
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=keep_days)
+
+    removed = 0
+    for path in sorted(_root().glob("*/incident.json"), reverse=True)[keep:]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            created = datetime.datetime.fromisoformat(data["created_at"])
+        except (OSError, ValueError, KeyError):
+            created = None
+        # Молодое не трогаем, даже если оно за пределами keep: разбор идёт
+        # именно по свежим.
+        if created is not None and created > cutoff:
+            continue
+        shutil.rmtree(path.parent, ignore_errors=True)
+        removed += 1
+    return removed
 
 
 def load(incident_id: str) -> Incident | None:

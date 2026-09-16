@@ -35,16 +35,29 @@ def _log(message: str) -> None:
 
 
 def handle(server: str, repo: pathlib.Path, dry_run: bool) -> int:
+    dropped = incidents.prune()
+    if dropped:
+        _log(f"журнал подрезан: удалено старых инцидентов — {dropped}")
+
     incident = detect.detect(server)
     if incident is None:
-        _log("поломок не обнаружено")
+        reason = detect.classify()[0]
+        _log(f"класс «{reason}» — за ним смотрит мониторинг, инцидент не завожу"
+             if reason else "поломок не обнаружено")
         return 0
 
-    _log(f"инцидент {incident.id}: {incident.reason} — {incident.state}")
+    repeats = incident.data.get("repeats", 0)
+    _log(f"инцидент {incident.id}: {incident.reason} — {incident.state}"
+         + (f", повтор {repeats}" if repeats else ""))
 
     if incident.state == incidents.NEEDS_HUMAN:
-        notify.incident_needs_human(incident)
-        _log("класс поломки не чинится кодом — позван человек")
+        # Зовём один раз: поломка та же, человек уже знает. Раньше уведомление
+        # уходило каждые 15 минут, потому что инцидент заводился заново.
+        if repeats == 0:
+            notify.incident_needs_human(incident)
+            _log("класс поломки не чинится кодом — позван человек")
+        else:
+            _log("та же поломка, человек уже позван")
         return 0
 
     if len(incident.attempts) >= config.MAX_HEAL_ATTEMPTS:
