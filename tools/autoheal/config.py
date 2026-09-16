@@ -86,6 +86,30 @@ DIAGNOSABLE_REASONS = ("wedge", "unknown")
 # Контейнер демона на этой машине — из него берётся хвост журнала для разбора.
 DAEMON_CONTAINER = os.environ.get("AUTOHEAL_CONTAINER", "openoutreach")
 
+# --- починка кода по красному тесту ---------------------------------------
+
+# Выключатель на случай, если петля начнёт мешать: ветки она создаёт сама,
+# в main не сливает никогда.
+REPAIR_ENABLED = _bool("AUTOHEAL_REPAIR", True)
+
+# Попыток патча на инцидент. Третья попытка модели по тому же красному тесту —
+# это уже перебор вариантов, а не понимание.
+REPAIR_MAX_ATTEMPTS = _int("AUTOHEAL_REPAIR_ATTEMPTS", 2)
+
+# Набор гоняется в одноразовом контейнере из боевого образа: на хосте нет ни
+# venv, ни зависимостей, зато здесь ровно тот же питон, что в бою.
+TEST_IMAGE = os.environ.get(
+    "AUTOHEAL_TEST_IMAGE",
+    "europe-west3-docker.pkg.dev/gen-lang-client-0289784019/openoutreach/openoutreach:cexim-figma",
+)
+TEST_TIMEOUT_SECONDS = _int("AUTOHEAL_TEST_TIMEOUT", 900)
+
+# Рабочие копии репозитория для попыток починки (git worktree).
+WORKTREE_DIR = os.environ.get("AUTOHEAL_WORKTREES", "/var/lib/openoutreach-worktrees")
+
+# Замок на один прогон: попытка починки идёт минутами, крон ходит каждые 15.
+LOCK_PATH = os.environ.get("AUTOHEAL_LOCK", "/tmp/autoheal.lock")
+
 # По этим строкам в трассировке поломку относят к смерти браузера. Таймауты
 # сюда намеренно не входят: истёкшее ожидание элемента бывает и сменой вёрстки,
 # а её должен увидеть человек.

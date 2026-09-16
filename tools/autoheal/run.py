@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import fcntl
 import pathlib
-import subprocess
 import sys
 import time
 
-from tools.autoheal import config, detect, diagnose, heal, incidents, notify
+from tools.autoheal import config, detect, diagnose, heal, incidents, notify, repair
 
 
 def _verify(repo: pathlib.Path, candidate: pathlib.Path) -> tuple[bool, str]:
@@ -32,6 +32,17 @@ def _verify(repo: pathlib.Path, candidate: pathlib.Path) -> tuple[bool, str]:
 def _log(message: str) -> None:
     stamp = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"[{stamp}] {message}", flush=True)
+
+
+def _acquire_lock():
+    """Файловый замок на один прогон. None, если прогон уже идёт."""
+    handle = open(config.LOCK_PATH, "w", encoding="utf-8")  # noqa: SIM115
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
 
 
 def handle(server: str, repo: pathlib.Path, dry_run: bool) -> int:
@@ -57,6 +68,18 @@ def handle(server: str, repo: pathlib.Path, dry_run: bool) -> int:
             drafted = diagnose.write_draft(incident, repo)
             if drafted:
                 _log(f"черновой разбор готов: {incident.path}/diagnosis.md")
+
+        # Разбор есть — можно попробовать доказать поломку тестом и закрыть её
+        # патчем. Ветку создаёт сама, в main не сливает: это решает человек.
+        report = None
+        if drafted and not dry_run:
+            report = repair.attempt(incident, repo)
+            _log(f"починка по красному тесту: {report['state']} — "
+                 f"{str(report.get('detail', ''))[:200]}")
+
+        if report and report["state"] == "готова ветка":
+            notify.repair_ready(incident, report)
+            return 0
 
         # Зовём один раз: поломка та же, человек уже знает. Раньше уведомление
         # уходило каждые 15 минут, потому что инцидент заводился заново.
@@ -178,7 +201,18 @@ def main() -> int:
         parser.error("нужен --repo")
 
     server = args.server or config.TARGET_SERVERS[0]
-    return handle(server, pathlib.Path(args.repo), args.dry_run)
+
+    # Прогон перестал быть мгновенным: попытка починки гоняет набор в контейнере
+    # и занимает минуты, а крон приходит каждые пятнадцать. Два прогона разом
+    # подрались бы за одну рабочую копию и один инцидент.
+    lock = _acquire_lock()
+    if lock is None:
+        _log("предыдущий прогон ещё идёт — пропускаю")
+        return 0
+    try:
+        return handle(server, pathlib.Path(args.repo), args.dry_run)
+    finally:
+        lock.close()
 
 
 if __name__ == "__main__":

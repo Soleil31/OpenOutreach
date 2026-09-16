@@ -79,6 +79,25 @@ def incident_needs_human(incident) -> None:
            f"{action}{draft}")
 
 
+def repair_ready(incident, report: dict) -> None:
+    """Готовая ветка с патчем, подтверждённым красным тестом."""
+    _write("готова ветка", incident,
+           f"Поломка {incident.reason} воспроизведена тестом, патч её закрывает,\n"
+           f"остальной набор зелёный.\n\n"
+           f"Ветка: {report.get('branch', '?')}\n"
+           f"{report.get('detail', '')}\n\n"
+           f"В main НЕ слито — смотреть и сливать руками.",
+           branch=report.get("branch", ""))
+
+
+def repair_failed(incident, report: dict) -> None:
+    """Починка не вышла. Это нормальный исход, и о нём тоже надо знать."""
+    _write("починка не вышла", incident,
+           f"Поломка {incident.reason}: {report.get('state', '')}.\n"
+           f"{report.get('detail', '')}\n\n"
+           f"Разбор и улики: {incident.path}")
+
+
 def verdict(incident, green: bool, detail: str) -> None:
     _write("вердикт", incident,
            ("Патч подтверждён верификатором.\n" if green
