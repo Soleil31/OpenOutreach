@@ -7,6 +7,7 @@ from django.db import transaction
 
 from linkedin.url_utils import url_to_public_id, public_id_to_url
 from linkedin.enums import ProfileState
+from linkedin.exceptions import ProfileViewLimitReached
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,10 @@ def discover_and_enrich(session, urls):
 
         try:
             profile, _raw = api.get_profile(profile_url=url)
+        except ProfileViewLimitReached:
+            # Not a failure of this profile: the budget is spent. The rest of
+            # the page would only hit the same wall.
+            raise
         except Exception:
             logger.warning("Voyager API failed for %s — skipping", url)
             continue

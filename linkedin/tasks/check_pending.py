@@ -14,7 +14,7 @@ from termcolor import colored
 
 from linkedin.db.deals import get_profile_dict_for_public_id, set_profile_state
 from linkedin.enums import ProfileState
-from linkedin.exceptions import SkipProfile
+from linkedin.exceptions import ProfileViewLimitReached, SkipProfile
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ def _bump_backoff(session, public_id: str, current_hours: float) -> float:
 
 def handle_check_pending(task, session, qualifiers):
     from linkedin.actions.status import get_connection_status
+    from linkedin.tasks.scheduler import enqueue_check_pending
 
     payload = task.payload
     public_id = payload["public_id"]
@@ -55,6 +56,13 @@ def handle_check_pending(task, session, qualifiers):
 
     try:
         new_state = get_connection_status(session, profile)
+    except ProfileViewLimitReached as spent:
+        # Not an answer about the invitation — just not today's budget.
+        logger.info("check_pending %s postponed: %s", public_id, spent)
+        enqueue_check_pending(
+            session.campaign.pk, public_id, backoff_hours, delay_seconds=spent.retry_after,
+        )
+        return
     except SkipProfile as e:
         logger.warning("Skipping %s: %s", public_id, e)
         set_profile_state(session, public_id, ProfileState.FAILED.value)

@@ -26,7 +26,11 @@ from linkedin import account_state
 from linkedin.account_state import LoginBlocked
 from linkedin.browser import reaper
 from linkedin.diagnostics import capture_wedge, failure_diagnostics
-from linkedin.exceptions import AuthenticationError, BrowserUnresponsiveError
+from linkedin.exceptions import (
+    AuthenticationError,
+    BrowserUnresponsiveError,
+    ProfileViewLimitReached,
+)
 from linkedin.ml.qualifier import BayesianQualifier, KitQualifier
 from linkedin.models import Task
 from linkedin.tasks.check_pending import handle_check_pending
@@ -540,11 +544,17 @@ def run_daemon(session):
     kit = fetch_kit()
     if kit:
         freemium_campaign = import_freemium_campaign(kit["config"])
-        if freemium_campaign:
+        # Seeding opens profiles — a switched-off kit campaign must not do it.
+        if freemium_campaign and freemium_campaign.active:
             prev_campaign = session.campaign
             session.campaign = freemium_campaign
             from linkedin.setup.freemium import seed_profiles
-            seed_profiles(session, kit["config"])
+            try:
+                seed_profiles(session, kit["config"])
+            except ProfileViewLimitReached as spent:
+                # Seeding opens profiles too; a spent budget must not stop the
+                # daemon from starting — the connect loop resumes it later.
+                logger.info("[Freemium] seeding postponed: %s", spent)
             session.campaign = prev_campaign
 
     qualifiers = _build_qualifiers(
@@ -610,6 +620,12 @@ def run_daemon(session):
         if not campaign:
             logger.error("Campaign %s not found", task.payload.get("campaign_id"))
             task.mark_failed()
+            continue
+        if not campaign.active:
+            # Tasks queued before the campaign was switched off. reconcile
+            # only seeds active campaigns, so these do not come back.
+            logger.info("[%s] campaign is switched off — dropping %s", campaign, task)
+            task.mark_completed()
             continue
 
         session.campaign = campaign

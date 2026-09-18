@@ -37,9 +37,9 @@ class AccountSession:
 
     @cached_property
     def campaigns(self):
-        """All campaigns this user belongs to (cached)."""
+        """All active campaigns this user belongs to (cached)."""
         from linkedin.models import Campaign
-        return list(Campaign.objects.filter(users=self.django_user))
+        return list(Campaign.objects.filter(users=self.django_user, active=True))
 
     def ensure_browser(self):
         """Launch or recover browser + login if needed. Call before using .page"""

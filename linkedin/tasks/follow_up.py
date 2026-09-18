@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from datetime import timedelta
 
 from django.utils import timezone
@@ -24,6 +25,25 @@ LIVE_CONVERSATION_MAX_HOURS = 8
 # When the messaging page does not load at all, the conversation is kept and
 # retried later instead of being thrown back to QUALIFIED.
 NETWORK_RETRY_HOURS = 2
+
+# Pause between two outgoing messages, drawn fresh each time. Before it the
+# whole daily quota went out as one burst: 25 messages in 18-30 minutes every
+# morning, a pattern no person produces.
+SEND_GAP_SECONDS = (600, 1200)
+
+
+def _seconds_until_next_send(linkedin_profile) -> float:
+    """How long to wait so the previous message is at least one gap behind."""
+    last = (
+        ActionLog.objects
+        .filter(linkedin_profile=linkedin_profile, action_type=ActionLog.ActionType.FOLLOW_UP)
+        .order_by("-created_at")
+        .first()
+    )
+    if last is None:
+        return 0.0
+    elapsed = (timezone.now() - last.created_at).total_seconds()
+    return max(0.0, random.uniform(*SEND_GAP_SECONDS) - elapsed)
 
 
 def _build_send_profile(deal) -> dict:
@@ -107,7 +127,7 @@ def handle_follow_up(task, session, qualifiers):
     from linkedin.db.deals import set_profile_state
     from linkedin.db.summaries import materialize_profile_summary_if_missing
     from linkedin.enums import ProfileState
-    from linkedin.exceptions import MessagingNetworkError
+    from linkedin.exceptions import MessagingNetworkError, ProfileViewLimitReached
     from linkedin.handoff import notify_handoff
     from linkedin.tasks.scheduler import enqueue_follow_up
 
@@ -150,7 +170,20 @@ def handle_follow_up(task, session, qualifiers):
         enqueue_follow_up(campaign_id, public_id, delay_seconds=24 * 3600)
         return
 
-    materialize_profile_summary_if_missing(deal, session)
+    # Before the agent: waiting costs nothing, and a drafted message would be
+    # thrown away anyway.
+    wait = _seconds_until_next_send(session.linkedin_profile)
+    if wait > 0:
+        logger.debug("[%s] follow_up %s: spacing sends — back in %ds", session.campaign, public_id, wait)
+        enqueue_follow_up(campaign_id, public_id, delay_seconds=wait)
+        return
+
+    try:
+        materialize_profile_summary_if_missing(deal, session)
+    except ProfileViewLimitReached as spent:
+        # The reply can be written from the conversation alone; the lead should
+        # not wait for tomorrow's profile budget.
+        logger.info("[%s] follow_up %s: no profile summary (%s)", session.campaign, public_id, spent)
     decision = run_follow_up_agent(session, deal)
 
     profile = _build_send_profile(deal)

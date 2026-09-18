@@ -86,14 +86,19 @@ def enqueue_check_pending(
     campaign_id: int,
     public_id: str,
     backoff_hours: float,
+    delay_seconds: float | None = None,
 ) -> float:
     """Enqueue a check_pending task with equal-jitter backoff.
 
     Delay is uniform over ``[backoff_hours/2, backoff_hours]``. Returns
-    the chosen delay in hours (for logging).
+    the chosen delay in hours (for logging). ``delay_seconds`` overrides the
+    delay while keeping ``backoff_hours`` for the next real check — used when
+    the task is only postponed, not answered.
     """
     half = backoff_hours / 2
     delay_hours = half + random.uniform(0, half)
+    if delay_seconds is not None:
+        delay_hours = delay_seconds / 3600
 
     _insert_task(
         task_type=Task.TaskType.CHECK_PENDING,

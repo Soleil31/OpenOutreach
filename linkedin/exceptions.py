@@ -23,6 +23,19 @@ class ReachedConnectionLimit(Exception):
     pass
 
 
+class ProfileViewLimitReached(Exception):
+    """The account's profile-view budget is spent; try again after ``retry_after``.
+
+    Deliberately NOT an IOError: tenacity retries IOError on Voyager calls, and
+    this must never be retried — the whole point is to stop asking.
+    """
+
+    def __init__(self, retry_after: float, reason: str):
+        super().__init__(f"{reason} — retry in {int(retry_after)}s")
+        self.retry_after = retry_after
+        self.reason = reason
+
+
 class MessagingNetworkError(IOError):
     """The messaging page never loaded, and the API fallback could not deliver.
 

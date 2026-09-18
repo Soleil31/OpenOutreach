@@ -156,6 +156,11 @@ class Campaign(models.Model):
     booking_link = models.URLField(max_length=500, blank=True)
     is_freemium = models.BooleanField(default=False)
     outreach_enabled = models.BooleanField(default=True)
+    # Off = the daemon ignores the campaign entirely: no tasks, no seeding, no
+    # qualification. Unlike outreach_enabled=False ("base mode"), which still
+    # opens profiles to grow the lead base. import_freemium_campaign never
+    # touches this flag, so switching the kit campaign off survives restarts.
+    active = models.BooleanField(default=True)
     action_fraction = models.FloatField(default=0.2)
     seed_public_ids = models.JSONField(default=list, blank=True)
     model_blob = models.BinaryField(null=True, blank=True)
@@ -218,6 +223,13 @@ class LinkedInProfile(models.Model):
     connect_daily_limit = models.PositiveIntegerField(default=20)
     connect_weekly_limit = models.PositiveIntegerField(default=100)
     follow_up_daily_limit = models.PositiveIntegerField(default=25)
+    # Every profile the bot opens — enrichment, qualification, status checks.
+    # There was no such limit: slow model fits and crashes throttled the
+    # pipeline by accident, and the first clean full day (2026-09-17) opened
+    # 742 profiles and got the account restricted for "an unusually high
+    # volume of LinkedIn profile data". Hourly cap keeps it from front-loading.
+    profile_view_daily_limit = models.PositiveIntegerField(default=80)
+    profile_view_hourly_limit = models.PositiveIntegerField(default=12)
     legal_accepted = models.BooleanField(default=False)
     cookie_data = models.JSONField(null=True, blank=True)
     cookie_import_json = models.TextField(blank=True, default="")
@@ -310,6 +322,26 @@ class SearchKeyword(models.Model):
 
     def __str__(self):
         return self.keyword
+
+
+class ProfileView(models.Model):
+    """One profile opened through Voyager — counted against the daily budget.
+
+    Kept apart from ActionLog on purpose: the deadman check and the client's
+    report read ActionLog as "real outreach happened", and a bot that only
+    browses profiles must not look alive to either of them.
+    """
+
+    linkedin_profile = models.ForeignKey(
+        LinkedInProfile,
+        on_delete=models.CASCADE,
+        related_name="profile_views",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = "linkedin"
+        indexes = [models.Index(fields=["linkedin_profile", "created_at"])]
 
 
 class ActionLog(models.Model):

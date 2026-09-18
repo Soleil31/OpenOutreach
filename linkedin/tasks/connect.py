@@ -17,7 +17,12 @@ from linkedin.db.deals import increment_connect_attempts, set_profile_state
 from linkedin.db.leads import disqualify_lead
 from linkedin.models import ActionLog
 from linkedin.enums import ProfileState
-from linkedin.exceptions import ProfileInaccessibleError, ReachedConnectionLimit, SkipProfile
+from linkedin.exceptions import (
+    ProfileInaccessibleError,
+    ProfileViewLimitReached,
+    ReachedConnectionLimit,
+    SkipProfile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +73,22 @@ def strategy_for(campaign, qualifiers):
 
 
 def handle_connect(task, session, qualifiers):
+    """Search, qualify and connect — until the profile-view budget runs out.
+
+    Every stage of the pipeline opens profiles. When the budget is spent the
+    whole connect loop waits for it to refill instead of failing: a failed task
+    is re-created by reconcile at once and would hit the same wall.
+    """
+    from linkedin.tasks.scheduler import enqueue_connect
+
+    try:
+        _handle_connect(task, session, qualifiers)
+    except ProfileViewLimitReached as spent:
+        logger.info("[%s] connect paused: %s", session.campaign, spent)
+        enqueue_connect(session.campaign.pk, delay_seconds=spent.retry_after)
+
+
+def _handle_connect(task, session, qualifiers):
     from linkedin.actions.connect import send_connection_request
     from linkedin.actions.status import get_connection_status
     from linkedin.tasks.scheduler import enqueue_connect, seconds_until_tomorrow

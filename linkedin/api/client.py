@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from linkedin import profile_budget
 from linkedin.api.voyager import parse_linkedin_voyager_response, parse_connection_degree
 from linkedin.browser.reaper import kill_browser
 from linkedin.url_utils import url_to_public_id
@@ -180,6 +181,11 @@ class PlaywrightLinkedinAPI:
         if not public_identifier:  # None from url_to_public_id or missing arg
             raise ValueError("Need public_identifier or profile_url")
 
+        # Our own profile is one call per session start, not browsing.
+        counted = public_identifier != "me"
+        if counted:
+            profile_budget.check(self.session.linkedin_profile)
+
         params = {
             'decorationId': 'com.linkedin.voyager.dash.deco.identity.profile.FullProfileWithEntities-91',
             'memberIdentity': public_identifier,
@@ -191,6 +197,8 @@ class PlaywrightLinkedinAPI:
         full_url = base_url + uri
 
         res = self.get(full_url, params=params)
+        if counted:
+            profile_budget.record(self.session.linkedin_profile)
 
         self._check_profile_response(res, public_identifier)
 
@@ -215,6 +223,8 @@ class PlaywrightLinkedinAPI:
         MemberRelationship entities even when FullProfileWithEntities
         does not.  Returns 1/2/3 or None.
         """
+        # A lighter decoration of the same profile — still a profile view.
+        profile_budget.check(self.session.linkedin_profile)
         res = self.get(
             "https://www.linkedin.com/voyager/api/identity/dash/profiles",
             params={
@@ -223,6 +233,7 @@ class PlaywrightLinkedinAPI:
                 "q": "memberIdentity",
             },
         )
+        profile_budget.record(self.session.linkedin_profile)
 
         self._check_profile_response(res, public_identifier)
 
