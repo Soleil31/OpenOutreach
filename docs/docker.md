@@ -27,6 +27,30 @@ On Linux with `vinagre`:
 vinagre vnc://127.0.0.1:5900
 ```
 
+### Restoring a LinkedIn session by hand
+
+When the daemon parks with `checkpoint_2fa` (or any reason that needs a human),
+it has stopped touching LinkedIn and waits. The session is restored in the
+daemon's own browser, so the saved state is one the daemon can read:
+
+```bash
+docker stop openoutreach-watchdog     # it restarts the container on a proxy blip
+docker exec -u ubuntu -e DISPLAY=:99 openoutreach python manage.py save_session
+# open noVNC, get past whatever LinkedIn asks; the command saves the session
+# the moment any tab reaches the feed
+docker restart openoutreach           # a parked daemon only re-reads cookies on start
+docker start openoutreach-watchdog
+```
+
+By default it starts from the saved cookies: they carry `bcookie`, the id
+LinkedIn uses to recognise a known device. On 2026-09-18 that alone got past
+the checkpoint the daemon had been parked by, once the proxy exit was a stable
+home connection instead of a hopping Starlink one. `--fresh` starts from the
+login form instead; `--autofill` fills it once and never retries.
+
+Before starting, check what the proxy looks like from the container: a
+checkpoint right after the exit IP changed is a proxy problem first.
+
 ### Stopping & Restarting
 
 ```bash
