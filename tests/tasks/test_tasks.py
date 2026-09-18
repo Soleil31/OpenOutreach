@@ -12,10 +12,10 @@ from linkedin.db.leads import create_enriched_lead, promote_lead_to_deal
 from linkedin.models import ActionLog, Task
 from linkedin.ml.qualifier import BayesianQualifier
 from linkedin.enums import ProfileState
-from linkedin.exceptions import SkipProfile, ReachedConnectionLimit
+from linkedin.exceptions import MessagingNetworkError, SkipProfile, ReachedConnectionLimit
 from linkedin.tasks.connect import ConnectStrategy, handle_connect
 from linkedin.tasks.check_pending import handle_check_pending
-from linkedin.tasks.follow_up import handle_follow_up
+from linkedin.tasks.follow_up import NETWORK_RETRY_HOURS, handle_follow_up
 
 
 SAMPLE_PROFILE = {
@@ -353,6 +353,31 @@ class TestHandleFollowUp:
         assert ActionLog.objects.filter(action_type=ActionLog.ActionType.FOLLOW_UP).count() == 0
         deal = Deal.objects.get(lead__public_identifier="alice", campaign=fake_session.campaign)
         assert deal.state == ProfileState.QUALIFIED
+
+    @patch("linkedin.db.summaries.materialize_profile_summary_if_missing")
+    @patch("linkedin.actions.message.send_raw_message",
+           side_effect=MessagingNetworkError("messaging page did not load"))
+    @patch("linkedin.agents.follow_up.run_follow_up_agent")
+    def test_a_network_failure_keeps_the_conversation(self, mock_agent, mock_send, mock_materialize, fake_session):
+        """16.09.2026 прокси не грузил страницы — и 34 живые сделки уехали в Qualified."""
+        mock_agent.return_value = FollowUpDecision(
+            action="send_message", message="Hi!", follow_up_hours=24,
+        )
+        _make_connected(fake_session)
+
+        task = _make_task(
+            Task.TaskType.FOLLOW_UP,
+            {"campaign_id": fake_session.campaign.pk, "public_id": "alice"},
+        )
+        handle_follow_up(task, fake_session, _build_context(fake_session))
+
+        deal = Deal.objects.get(lead__public_identifier="alice", campaign=fake_session.campaign)
+        assert deal.state == ProfileState.CONNECTED
+        assert ActionLog.objects.filter(action_type=ActionLog.ActionType.FOLLOW_UP).count() == 0
+
+        retry = Task.objects.get(task_type=Task.TaskType.FOLLOW_UP, status=Task.Status.PENDING)
+        wait = (retry.scheduled_at - timezone.now()).total_seconds()
+        assert abs(wait - NETWORK_RETRY_HOURS * 3600) < 60
 
     @patch("linkedin.db.summaries.materialize_profile_summary_if_missing")
     @patch("linkedin.agents.follow_up.run_follow_up_agent")

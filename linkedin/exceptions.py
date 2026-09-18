@@ -23,6 +23,17 @@ class ReachedConnectionLimit(Exception):
     pass
 
 
+class MessagingNetworkError(IOError):
+    """The messaging page never loaded, and the API fallback could not deliver.
+
+    A verdict on the network, not on the lead. A failed send used to move the
+    Deal back to QUALIFIED "for re-connection" — and during the 2026-09-16
+    proxy outage every send failed exactly this way, throwing 34 live
+    conversations out of CONNECTED in one morning.
+    """
+    pass
+
+
 class BrowserUnresponsiveError(IOError):
     """Python-side watchdog fired because Playwright did not return in time.
 

@@ -21,6 +21,10 @@ MIN_DAYS_PER_UNANSWERED = 3
 # unread for three days is a lost one.
 LIVE_CONVERSATION_MAX_HOURS = 8
 
+# When the messaging page does not load at all, the conversation is kept and
+# retried later instead of being thrown back to QUALIFIED.
+NETWORK_RETRY_HOURS = 2
+
 
 def _build_send_profile(deal) -> dict:
     """Minimal profile dict for ``send_raw_message`` and its fallbacks.
@@ -103,6 +107,7 @@ def handle_follow_up(task, session, qualifiers):
     from linkedin.db.deals import set_profile_state
     from linkedin.db.summaries import materialize_profile_summary_if_missing
     from linkedin.enums import ProfileState
+    from linkedin.exceptions import MessagingNetworkError
     from linkedin.handoff import notify_handoff
     from linkedin.tasks.scheduler import enqueue_follow_up
 
@@ -155,7 +160,10 @@ def handle_follow_up(task, session, qualifiers):
         # message — so this deliberately does NOT fall back to QUALIFIED the
         # way send_message does.
         logger.info("[%s] follow_up handoff for %s: %s", session.campaign, public_id, decision.message)
-        sent = send_raw_message(session, profile, decision.message)
+        try:
+            sent = send_raw_message(session, profile, decision.message)
+        except MessagingNetworkError:
+            sent = False
         if sent:
             session.linkedin_profile.record_action(
                 ActionLog.ActionType.FOLLOW_UP, session.campaign,
@@ -173,7 +181,18 @@ def handle_follow_up(task, session, qualifiers):
 
     if decision.action == "send_message":
         logger.info("[%s] follow_up message for %s: %s", session.campaign, public_id, decision.message)
-        sent = send_raw_message(session, profile, decision.message)
+        try:
+            sent = send_raw_message(session, profile, decision.message)
+        except MessagingNetworkError as network_error:
+            # Nothing is wrong with the lead — LinkedIn did not load. Keep the
+            # conversation and come back; demoting here threw 34 live deals
+            # out of CONNECTED during the 2026-09-16 proxy outage.
+            logger.warning(
+                "[%s] follow_up for %s: messaging did not load (%s) — keeping CONNECTED, retry in %dh",
+                session.campaign, public_id, network_error, NETWORK_RETRY_HOURS,
+            )
+            enqueue_follow_up(campaign_id, public_id, delay_seconds=NETWORK_RETRY_HOURS * 3600)
+            return
         if not sent:
             set_profile_state(session, public_id, ProfileState.QUALIFIED.value)
             logger.warning("follow_up for %s: send failed — moving to QUALIFIED for re-connection", public_id)

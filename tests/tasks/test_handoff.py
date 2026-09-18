@@ -8,6 +8,7 @@ from linkedin import handoff
 from linkedin.agents.follow_up import FollowUpDecision
 from linkedin.db.deals import set_profile_state
 from linkedin.enums import ProfileState
+from linkedin.exceptions import MessagingNetworkError
 from linkedin.models import ActionLog, Task
 from linkedin.tasks.follow_up import handle_follow_up
 
@@ -91,6 +92,20 @@ class TestHandleHandoff:
         # something to re-connect to.
         assert deal.state == ProfileState.HANDOFF
         assert "not sent" in deal.reason
+        assert len(list(tmp_path.glob("deal-*.txt"))) == 1
+
+    @patch("linkedin.actions.message.send_raw_message",
+           side_effect=MessagingNetworkError("messaging page did not load"))
+    def test_a_network_failure_still_reaches_a_human(self, mock_send, fake_session, tmp_path):
+        """Горячий лид доходит до человека и тогда, когда прокси лежит."""
+        _make_connected(fake_session)
+        with patch.object(handoff, "SPOOL_DIR", str(tmp_path)):
+            _run(fake_session, FollowUpDecision(
+                action="handoff", message=HOLDING, follow_up_hours=24,
+            ))
+
+        deal = _deal(fake_session)
+        assert deal.state == ProfileState.HANDOFF
         assert len(list(tmp_path.glob("deal-*.txt"))) == 1
 
     @pytest.mark.parametrize("state", [

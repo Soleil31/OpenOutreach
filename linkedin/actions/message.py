@@ -4,6 +4,7 @@ from typing import Dict, Any
 
 from playwright.sync_api import Error as PlaywrightError, Locator
 from linkedin.browser.nav import goto_page, human_type, dump_page_html
+from linkedin.exceptions import MessagingNetworkError
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +34,25 @@ def _find(page, key: str, timeout: int = 5000) -> Locator:
 
 
 def send_raw_message(session, profile: Dict[str, Any], message: str) -> bool:
-    """Send an arbitrary message to a profile. Returns True if sent."""
+    """Send an arbitrary message to a profile. Returns True if sent.
+
+    Raises ``MessagingNetworkError`` when the messaging page never loaded and
+    the API fallback could not deliver either. That is a network failure, not
+    a verdict on the lead, and callers must not treat it like ``False``.
+    """
     public_identifier = profile.get("public_identifier")
 
-    if _send_message(session, profile, message):
-        return True
+    try:
+        if _send_message(session, profile, message):
+            return True
+    except MessagingNetworkError:
+        # The API fallback can still reach an existing conversation: on
+        # 2026-09-16 small Voyager calls got through a proxy that could not
+        # load a single page. No page dump — there is no page to dump.
+        if _send_message_via_api(session, profile, message):
+            return True
+        logger.error("All send methods failed for %s — the network, not the lead", public_identifier)
+        raise
     dump_page_html(session, profile, category="message_direct")
 
     if _send_message_via_api(session, profile, message):
@@ -62,8 +77,8 @@ def _send_message(session, profile: Dict[str, Any], message: str) -> bool:
     if not target_urn:
         logger.error("Cannot send via direct thread: no URN for %s", public_identifier)
         return False
+    thread_url = f"{LINKEDIN_MESSAGING_URL}?recipient={encode_urn(target_urn)}"
     try:
-        thread_url = f"{LINKEDIN_MESSAGING_URL}?recipient={encode_urn(target_urn)}"
         goto_page(
             session,
             action=lambda: session.page.goto(thread_url),
@@ -71,6 +86,13 @@ def _send_message(session, profile: Dict[str, Any], message: str) -> bool:
             timeout=30_000,
             error_message="Error opening messaging thread",
         )
+    except (PlaywrightError, TimeoutError) as e:
+        # The page did not load at all. Kept apart from the compose failures
+        # below: those can mean the lead cannot be messaged, this cannot.
+        logger.error("Messaging page did not load for %s → %s", public_identifier, e)
+        raise MessagingNetworkError(f"messaging page did not load: {e}") from e
+
+    try:
         session.wait(1, 2)
 
         human_type(
